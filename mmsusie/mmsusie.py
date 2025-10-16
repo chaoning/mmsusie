@@ -44,6 +44,104 @@ class MMSuSiE:
         self.Vi = None # Inverse of V
 
         self.V_logdet = 0 # log|V|
+    
+    def run(self, pheno_file, trait, env_int, grm_file, bedfile, snp_id, varcom_file, out_file,
+            L=10, maxiter=100, tol=1e-3, coverage=0.95, min_abs_corr=0.5, prior_tol = 1e-09):
+        """
+        Main function to run the MMSuSiE analysis.
+
+        Args:
+            pheno_file (str): Path to the phenotype data file.
+            trait (str): Column name of the target trait.
+            env_int (list): List of column names for interacting environmental covariates.
+            grm_file (str): Prefix path to the GRM files.
+            bedfile (str): Path to the plink binary file.
+            snp_id (str): SNP ID to include in the genotype matrix.
+            varcom_file (str): Path to the file containing variance components.
+            out_file (str): Path to the output file.
+            L (int, optional): Maximum number of non-zero effects. Defaults to 10.
+            maxiter (int, optional): Maximum number of iterations. Defaults to 100.
+            tol (float, optional): Convergence tolerance for ELBO. Defaults to 1e-3.
+            coverage (float, optional): Credible set coverage. Defaults to 0.95.
+            min_abs_corr (float, optional): Minimum absolute correlation for credible set purity. Defaults to 0.5.
+            prior_tol (float, optional): Tolerance for filtering prior components. Defaults to 1e-09.
+
+        Returns:
+            dict: Results from the MMSuSiE analysis.
+        """
+        # Step 1: Read and preprocess data
+        self.read_data(pheno_file, trait, env_int)
+
+        # Step 2: Read GRM and align with phenotype data
+        self.read_sp_grm(grm_file)
+
+        # Step 3: Extract environmental covariates and phenotype
+        E = self.get_env_int(scale=True)            # (n, K)
+
+        # Step 4: Get genotype matrix (force (n,1) for single SNP)
+        G = self.get_genotype(bedfile, [snp_id], scale=True)
+
+        # Build main-effects design with intercept
+        n = G.shape[0]
+        X = np.hstack((np.ones((n, 1)), G, E))       # (n, 1+1+K)
+
+        # Phenotype, then project out main effects (OLS-safe; see GLS note below)
+        y = self.get_y(adjust=False, scale=False)
+        XtX = X.T @ X
+        Xty = X.T @ y
+        # Solve (X'X) beta = X'y
+        beta = np.linalg.solve(XtX, Xty)
+        y = y - X @ beta
+
+        # Standardize y
+        y = (y - np.mean(y)) / np.std(y)
+
+        # Step 5: Load variance components and calculate Vi and log|V|
+        varcom = np.loadtxt(varcom_file)[:, 0]
+        self.cal_spVi(varcom)
+
+        # Step 6: Build GE interactions
+        GE = G * E                                   # (n, K), broadcasts over K envs
+
+        # Step 7: Run MMSuSiE on GE interactions
+        res = self.mmsusie(GE, y, L=L, maxiter=maxiter, tol=tol, coverage=coverage,
+                        min_abs_corr=min_abs_corr, prior_tol=prior_tol)
+        self.out_mmsusie(res, out_file)
+        return res
+
+    def ld_pure(self, assoc_file, bed_file, ld_r2=0.1, snp="SNP", p="p_gxe", p_cutoff=5e-8):
+        df = pd.read_csv(assoc_file, sep=r"\s+")
+        df = df[df[p] < p_cutoff].copy()
+        df = df.sort_values(by=p)
+        sig_snp_lst = df[snp].tolist()
+        if not sig_snp_lst:
+            raise ValueError("No significant SNPs found with the given p-value cutoff.")
+        logging.info(f"The number of significant SNPs: {len(sig_snp_lst)}")
+
+        # Read the bim file and get the index of the used SNPs
+        bim_file = bed_file + ".bim"
+        df_bim = pd.read_csv(bim_file, sep=r"\s+", header=None, dtype={0: str, 1: str})
+        missing_snps = set(sig_snp_lst) - set(df_bim[1].tolist())
+        if missing_snps:
+            raise ValueError(f"Missing SNPs in bim file: {missing_snps}")
+        dct = {df_bim.iloc[i, 1]: i for i in range(df_bim.shape[0])}
+        sig_snp_index = [dct[sid] for sid in sig_snp_lst]
+
+        # Read the genotype matrix from the bed file
+        snp_on_disk = Bed(bed_file, count_A1=True)
+        genotype_matrix = snp_on_disk[:, sig_snp_index].read().val
+        genotype_matrix = pd.DataFrame(genotype_matrix, columns=sig_snp_lst)
+        ld_r2_mat = genotype_matrix.corr() ** 2
+        
+        leading_snps = []
+        while not ld_r2_mat.empty:
+            leading_snps.append(ld_r2_mat.columns[0])
+            corr_arr = ld_r2_mat.iloc[0, 1:].to_numpy()
+            ld_r2_mat = ld_r2_mat.iloc[1:, 1:]
+            ld_r2_mat = ld_r2_mat.loc[corr_arr < ld_r2, corr_arr < ld_r2]
+        
+        df_leading = df[df[snp].isin(leading_snps)].copy()
+        return df_leading
 
     def read_data(self, data_file, trait, env_int=[], iid_col=0):
         """
