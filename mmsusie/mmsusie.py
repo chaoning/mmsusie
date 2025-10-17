@@ -631,7 +631,7 @@ class MMSuSiE:
         alpha_arr2, mu_arr2 = filter_prior_components_mmsusie(alpha_arr2, mu_arr2, sigma0_arr, prior_tol)
         res_dct["alpha"] = alpha_arr2
         res_dct["mu"] = mu_arr2
-        res_dct["pip"] = getPIP(alpha_arr2)
+        res_dct["pip"] = pd.DataFrame({"pip": getPIP(alpha_arr2)}, index=self.env_int)
         status = in_CS(alpha_arr2, coverage)
         cs_lst = get_CS(status)
         claimed_coverage_arr = compute_claimed_coverage(cs_lst, alpha_arr2)

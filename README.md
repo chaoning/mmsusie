@@ -5,4 +5,6 @@ MMSuSiE is a Python package for statistical genetics analysis, focusing on spars
 ## Installation
 
 ```bash
+git clone https://github.com/chaoning/mmsusie.git
+cd mmsusie
 pip install .
