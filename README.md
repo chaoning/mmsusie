@@ -1,118 +1,124 @@
+# MMSuSiE
+
+MMSuSiE is a Python package for mixed-model SuSiE fine-mapping.
+It provides an end-to-end workflow for:
+
+- building additive genetic relationship matrices (GRM) from PLINK files,
+- estimating variance components with weighted EM-AI,
+- running MMSuSiE fine-mapping with GRM-adjusted covariance.
+
+## Project Layout
+
+This repository currently contains two MMSuSiE implementations:
+
+- `mmsusie/mmsusie_main.py`: streamlined workflow used by `test/test_mmsusie_main.py`.
+- `mmsusie/mmsusie.py`: extended research-oriented implementation.
+
+The quick start below uses `mmsusie_main.py`.
+
+## Requirements
+
+- Python >= 3.8
+- numpy >= 1.22
+- pandas >= 1.3
+- scipy >= 1.7
+- pysnptools >= 0.5
+- tqdm >= 4.60
+- joblib >= 1.2
+
 ## Installation
 
 ```bash
 git clone https://github.com/chaoning/mmsusie.git
 cd mmsusie
 pip install .
+```
 
+## Quick Start (Example Data)
 
-"""
-MMSuSiE main workflow usage example.
+Run the included end-to-end example:
 
-Run:
-    python test/test_mmsusie_main.py
+```bash
+python test/test_mmsusie_main.py
+```
 
-This script demonstrates an end-to-end pipeline:
-1) Build GRM from PLINK bed/bim/fam.
-2) Prepare y/X/GRM-aligned IDs for variance component estimation.
-3) Estimate variance components by EM-AI.
-4) Run MMSuSiE fine-mapping on a selected SNP region.
-5) Export results with SNP IDs.
+Expected outputs in `example/output/`:
 
-Required files (under example/):
-- test.bed, test.bim, test.fam
-- data.txt (contains IID + covariates + phenotype)
-"""
+- `test_grm.id`
+- `test_grm.grm.mat_fmt`
+- `test_mmsusie.pip.txt`
+- `test_mmsusie.alpha.txt`
+- `test_mmsusie.mu.txt`
+- `test_mmsusie.cs.txt`
 
+## End-to-End API Example
+
+```python
 import os
 
 from mmsusie.gmatrix import agmat
 from mmsusie.mmsusie_main import MMSuSiE
 from mmsusie.varcom import WeightEMAI, prepare_varcom_inputs
 
-# Resolve directories from script location, so execution does not depend on current cwd.
-script_dir = os.path.dirname(os.path.abspath(__file__))
-repo_root = os.path.abspath(os.path.join(script_dir, ".."))
-example_dir = os.path.join(repo_root, "example")
-output_dir = os.path.join(example_dir, "output")
-os.makedirs(output_dir, exist_ok=True)
-os.chdir(example_dir)
+os.chdir("example")
+os.makedirs("output", exist_ok=True)
 
-# ----------------------------
-# Step 1: Build GRM
-# ----------------------------
-# bed_file is PLINK prefix -> reads "test.bed/.bim/.fam".
-bed_file = "test"
-grm_out_prefix = "./output/test_grm"
-agmat(bed_file, grm_out_prefix)
+# 1) Build GRM from test.bed/.bim/.fam
+bed_prefix = "test"
+grm_prefix = "output/test_grm"
+agmat(bed_prefix, grm_prefix)
 
-# ----------------------------
-# Step 2: Prepare varcom inputs
-# ----------------------------
-# data.txt should include:
-# - IID column (used for alignment with GRM IDs)
-# - covariates: cov1, cov2, cov3
-# - phenotype: pheno
-pheno_file = "data.txt"
-trait_col = "pheno"
-covariate_cols = ["cov1", "cov2", "cov3"]
-categorical_cols = None
+# 2) Align phenotype/covariates with GRM
 inputs = prepare_varcom_inputs(
-    data_file=pheno_file,
-    trait_col=trait_col,
-    grm_prefix=grm_out_prefix,
-    covariate_cols=covariate_cols,
-    categorical_cols=categorical_cols,
+    data_file="data.txt",
+    trait_col="pheno",
+    grm_prefix=grm_prefix,
+    covariate_cols=["cov1", "cov2", "cov3"],
 )
-print("Prepared inputs:", inputs.keys())
 
-# ----------------------------
-# Step 3: Estimate variance components
-# ----------------------------
-# gmat_lst can contain multiple random-effect matrices.
-# Here we only use one GRM + one residual component.
-varcom_estimator = WeightEMAI()
-var_com = varcom_estimator.fit_vmat(
+# 3) Estimate variance components
+var_com = WeightEMAI().fit_vmat(
     y=inputs["y"],
     xmat=inputs["xmat"],
     gmat_lst=[inputs["gmat"]],
 )
-print("Estimated variance components:", var_com)
 
-# ----------------------------
-# Step 4: Run MMSuSiE
-# ----------------------------
+# 4) Run MMSuSiE
 ms = MMSuSiE()
-y = inputs["y"]
-xmat = inputs["xmat"]
-gmat = inputs["gmat"]
-
-# Build V^{-1} and log|V| from estimated variance components.
-ms.cal_Vi(gmat, var_com)
-
-# Regress out fixed effects from phenotype.
-y_adj = ms.process_y(y, xmat, adjust=True)
-
-# Select genotype matrix for aligned individuals.
-# Two supported selector modes:
-# - sid_lst=[...]
-# - start="rsA", end="rsB" (inclusive by BIM order)
-used_iids = inputs["used_iids"]
-start = "rs11132426"
-end = "rs7694910"
-g = ms.get_genotype(bed_file, iid_lst=used_iids, start=start, end=end)
-
-# Fit model; result includes PIP/CS/ELBO and SNP IDs.
+ms.cal_Vi(inputs["gmat"], var_com)
+y_adj = ms.process_y(inputs["y"], inputs["xmat"], adjust=True)
+g = ms.get_genotype(
+    bed_prefix,
+    iid_lst=inputs["used_iids"],
+    start="rs11132426",
+    end="rs7694910",
+)
 result = ms.fit(g, y_adj)
 
-# ----------------------------
-# Step 5: Export outputs
-# ----------------------------
-# Output files:
-# - test_mmsusie.pip.txt   (SNP, pip)
-# - test_mmsusie.alpha.txt (alpha matrix with SNP-ID columns)
-# - test_mmsusie.mu.txt    (mu matrix with SNP-ID columns)
-# - test_mmsusie.cs.txt    (credible sets in SNP IDs)
-ms.out(result, out_file="./output/test_mmsusie")
+# 5) Export result tables
+ms.out(result, out_file="output/test_mmsusie")
+```
 
+## Input Data Notes
 
+- PLINK genotype files must share one prefix: `<prefix>.bed/.bim/.fam`.
+- Phenotype table must include one row per individual and an IID column (default: `IID`).
+- GRM prefix refers to files generated by `agmat`, for example:
+  - `output/test_grm.id`
+  - `output/test_grm.grm.mat_fmt` (or `.grm.ind_fmt`)
+
+For SNP selection in `MMSuSiE.get_genotype`, use exactly one mode:
+
+- explicit list: `sid_lst=["rs1", "rs2", ...]`
+- inclusive BIM-order range: `start="rsA", end="rsB"`
+
+## Main Output Files
+
+- `.pip.txt`: posterior inclusion probabilities by SNP
+- `.alpha.txt`: posterior assignment probabilities for each effect component
+- `.mu.txt`: posterior mean effects
+- `.cs.txt`: credible sets
+
+## License
+
+GPL-3.0. See `LICENSE.md`.
