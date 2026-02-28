@@ -17,6 +17,8 @@ Required files (under example/):
 """
 
 import os
+import logging
+logging.basicConfig(level=logging.INFO)
 
 from mmsusie.gmatrix import agmat
 from mmsusie.mmsusie_main import MMSuSiE
@@ -64,7 +66,7 @@ print("Prepared inputs:", inputs.keys())
 # gmat_lst can contain multiple random-effect matrices.
 # Here we only use one GRM + one residual component.
 varcom_estimator = WeightEMAI()
-var_com = varcom_estimator.fit_vmat(
+var_com = varcom_estimator.fit(
     y=inputs["y"],
     xmat=inputs["xmat"],
     gmat_lst=[inputs["gmat"]],

@@ -55,6 +55,7 @@ Expected outputs in `example/output/`:
 
 ```python
 import os
+logging.basicConfig(level=logging.INFO)
 
 from mmsusie.gmatrix import agmat
 from mmsusie.mmsusie_main import MMSuSiE
@@ -74,10 +75,11 @@ inputs = prepare_varcom_inputs(
     trait_col="pheno",
     grm_prefix=grm_prefix,
     covariate_cols=["cov1", "cov2", "cov3"],
+    categorical_cols=None
 )
 
 # 3) Estimate variance components
-var_com = WeightEMAI().fit_vmat(
+var_com = WeightEMAI().fit(
     y=inputs["y"],
     xmat=inputs["xmat"],
     gmat_lst=[inputs["gmat"]],

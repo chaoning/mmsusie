@@ -98,7 +98,7 @@ class WeightEMAI:
             "Try a smaller step, different initialization, or check model conditioning."
         )
 
-    def fit_vmat(self, y, xmat, gmat_lst, init=None):
+    def fit(self, y, xmat, gmat_lst, init=None):
         """
         Estimate variance components with the V-matrix formulation.
 
