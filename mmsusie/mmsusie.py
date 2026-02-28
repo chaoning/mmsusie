@@ -820,4 +820,5 @@ class MMSuSiE:
                 fin.write(" ".join([str(int(i)) for i in vec]) + "\n")
         np.save(out_file + ".mu.npy", res_dct["mu"])
         np.savetxt(out_file + ".lfsr_cs.txt", res_dct["lfsr_cs"])
-        
+
+    

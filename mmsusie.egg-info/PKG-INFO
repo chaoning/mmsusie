@@ -1,0 +1,41 @@
+Metadata-Version: 2.4
+Name: mmsusie
+Version: 0.1.0
+Summary: mmSuSiE: A Python package for mixed model SuSiE
+Home-page: https://github.com/chaoning/mmsusie
+Author: Chao Ning
+Author-email: ningchao91@gmail.com
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3 :: Only
+Classifier: License :: OSI Approved :: GNU General Public License v3 (GPLv3)
+Classifier: Operating System :: OS Independent
+Requires-Python: >=3.8
+Description-Content-Type: text/markdown
+License-File: LICENSE.md
+Requires-Dist: numpy>=1.22
+Requires-Dist: pandas>=1.3
+Requires-Dist: scipy>=1.7
+Requires-Dist: pysnptools>=0.5
+Requires-Dist: tqdm>=4.60
+Requires-Dist: joblib>=1.2
+Dynamic: author
+Dynamic: author-email
+Dynamic: classifier
+Dynamic: description
+Dynamic: description-content-type
+Dynamic: home-page
+Dynamic: license-file
+Dynamic: requires-dist
+Dynamic: requires-python
+Dynamic: summary
+
+# MMSuSiE
+
+MMSuSiE is a Python package for statistical genetics analysis, focusing on sparse genetic relationship matrices and environmental covariates.
+
+## Installation
+
+```bash
+git clone https://github.com/chaoning/mmsusie.git
+cd mmsusie
+pip install .
