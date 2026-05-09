@@ -160,11 +160,11 @@ class MMSuSiESp:
         self.read_data(pheno_file, trait, env_int)
         self.read_sp_grm(grm_file)
 
+        E = self.get_env_int(scale=True)
+
         _vc = np.loadtxt(varcom_file)
         varcom = _vc[:, 0] if _vc.ndim == 2 else _vc
         self.cal_spVi(varcom)
-
-        E = self.get_env_int(scale=True)
         G = self.get_genotype(bedfile, sid_lst=[snp_id], scale=True)
 
         # get_y adjusts for [1, covariates, categoricals, E] via GLS
