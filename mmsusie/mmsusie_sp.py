@@ -370,7 +370,7 @@ class MMSuSiESp:
         df_sub_group = df_group[df_group[3] == 1].copy()
         GRM_groupSizeOnes = np.array([])
 
-        if df_sub_group.shape[0] > 1:
+        if df_sub_group.shape[0] > 0:
             sub_group_index = df_sub_group[0].tolist()
             GRM_groupSizeOnes = np.array([grm_dict[i][i] for i in sub_group_index])
         
@@ -533,7 +533,7 @@ class MMSuSiESp:
         if len(varcom) == 1:
             num_iid_used = len(self.iid_used)
             Vi_sp = sparse.identity(num_iid_used) / varcom[0]
-            V_logdet = num_iid_used * np.log(1/varcom[0])
+            V_logdet = num_iid_used * np.log(varcom[0])
         elif len(varcom) == 2:
             V_logdet = 0
             Vi_lst = []
@@ -578,6 +578,7 @@ class MMSuSiESp:
                     V_logdet += logdet
                     tmp_arr2 = np.linalg.inv(tmp_arr2)
                     Vi_lst.append(tmp_arr2)
+                start_index += num_element
             Vi_sp = make_sparse_block(Vi_lst)
         elif len(varcom) == 4:
             num_envi_int = self.env_int_arr2.shape[1]
@@ -606,6 +607,7 @@ class MMSuSiESp:
                     V_logdet += logdet
                     tmp_arr2 = np.linalg.inv(tmp_arr2)
                     Vi_lst.append(tmp_arr2)
+                start_index += num_element
             Vi_sp = make_sparse_block(Vi_lst)
         self.Vi = Vi_sp
         self.V_logdet = V_logdet
