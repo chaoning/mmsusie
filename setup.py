@@ -9,7 +9,7 @@ README = ROOT / "README.md"
 
 setup(
     name="mmsusie",
-    version="0.1.0",
+    version="1.0",
     author="Chao Ning",
     author_email="ningchao91@gmail.com",
     description="mmSuSiE: A Python package for mixed model SuSiE",

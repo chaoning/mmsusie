@@ -8,7 +8,7 @@ from pysnptools.snpreader import Bed
 from tqdm import tqdm
 
 
-VALID_METHODS = {"vanraden", "gcta"}
+VALID_METHODS = {"VanRaden", "GCTA"}
 VALID_OUTPUT_FORMATS = {"mat", "row_col_val", "id_id_val"}
 
 
@@ -28,7 +28,7 @@ def output_mat(mat: np.ndarray, id_df: pd.Series, out_file: str, out_fmt: str) -
         )
 
     if out_fmt == "mat":
-        np.savetxt(f"{out_file}.mat_fmt", mat)
+        np.savetxt(f"{out_file}.matrix", mat)
         return
 
     indices = np.tril_indices_from(mat)
@@ -41,7 +41,7 @@ def output_mat(mat: np.ndarray, id_df: pd.Series, out_file: str, out_fmt: str) -
             }
         )
         df.to_csv(
-            f"{out_file}.ind_fmt",
+            f"{out_file}.index_triplet",
             sep=" ",
             index=False,
             header=False,
@@ -58,7 +58,7 @@ def output_mat(mat: np.ndarray, id_df: pd.Series, out_file: str, out_fmt: str) -
         }
     )
     df.to_csv(
-        f"{out_file}.id_fmt",
+        f"{out_file}.iid_triplet",
         sep=" ",
         index=False,
         header=False,
@@ -67,7 +67,7 @@ def output_mat(mat: np.ndarray, id_df: pd.Series, out_file: str, out_fmt: str) -
 
 
 def _normalize_method(method: str) -> str:
-    normalized = str(method).strip().lower()
+    normalized = str(method).strip()
     if normalized not in VALID_METHODS:
         raise ValueError(f'Unknown method "{method}". Use one of {sorted(VALID_METHODS)}.')
     return normalized
@@ -110,7 +110,7 @@ def agmat(
     out_fmt: str = "mat",
     npart: int = 10,
     small_val: float = 0.001,
-    method: str = "vanraden",
+    method: str = "GCTA",
 ) -> np.ndarray:
     """
     Compute additive genomic relationship matrix (GRM).
@@ -118,8 +118,8 @@ def agmat(
     This function computes GRM using either VanRaden or GCTA normalization.
 
     Method:
-    - vanraden: G = W W' / sum_j(2 p_j (1 - p_j))
-    - gcta:     G = Z Z' / M, where each SNP is standardized by sqrt(2 p_j (1 - p_j))
+    - VanRaden: G = W W' / sum_j(2 p_j (1 - p_j))
+    - GCTA:     G = Z Z' / M, where each SNP is standardized by sqrt(2 p_j (1 - p_j))
     """
     if small_val < 0:
         raise ValueError("small_val must be >= 0.")
@@ -155,7 +155,7 @@ def agmat(
             continue
 
         centered = snp_mat[:, valid] - 2.0 * freq[valid]
-        if method == "vanraden":
+        if method == "VanRaden":
             kin += centered @ centered.T
             scale += float(np.sum(denom[valid]))
         else:
@@ -163,7 +163,7 @@ def agmat(
             kin += standardized @ standardized.T
             n_snp_used += int(np.sum(valid))
 
-    if method == "vanraden":
+    if method == "VanRaden":
         if scale <= 0.0:
             raise ValueError("No valid polymorphic SNPs were found for VanRaden GRM.")
         kin /= scale
@@ -183,7 +183,7 @@ def agmat(
     logging.info("{:#^80}".format("Write outputs"))
     fam_info = pd.read_csv(f"{bed_file}.fam", sep=r"\s+", header=None)
     logging.info("Output prefix: %s", out_file)
-    fam_info.iloc[:, 1].to_csv(f"{out_file}.id", index=False, header=False, sep=" ")
+    fam_info.iloc[:, 1].to_csv(f"{out_file}.grm.id", index=False, header=False, sep=" ")
     output_mat(kin, fam_info.iloc[:, 1], f"{out_file}.grm", out_fmt)
     return kin
 
@@ -198,7 +198,7 @@ if __name__ == "__main__":
     print("Current working directory:", os.getcwd())
     bed_file = "test"
     out_file = "output/test_grm"
-    kin = agmat(bed_file, out_file, out_fmt="mat", npart=5, small_val=0.001, method="vanraden")
+    kin = agmat(bed_file, out_file, out_fmt="mat", npart=5, small_val=0.001, method="VanRaden")
     print("mean kinship diagonal:", np.mean(np.diag(kin)))
     print("mean kinship off-diagonal:", np.mean(kin[np.tril_indices_from(kin, k=-1)]))
 
