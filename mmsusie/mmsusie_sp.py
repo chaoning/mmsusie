@@ -128,68 +128,59 @@ class MMSuSiESp:
         self.varcom = None  # [sigma_g2, sigma_e2] stored by cal_spVi for estimate_sigma
         self.last_snp_ids = None  # SNP ids from the latest get_genotype call
     
-    def run(self, pheno_file, trait, env_int, grm_file, bedfile, snp_id, varcom_file, out_file,
-            L=10, maxiter=100, tol=1e-3, coverage=0.95, min_abs_corr=0.5, prior_tol = 1e-09):
+    def mmsusie_lead_gxe(self, pheno_file, trait, env_int, grm_file, bedfile, snp_id, varcom_file, out_file,
+               L=10, maxiter=100, tol=1e-3, coverage=0.95, min_abs_corr=0.5, prior_tol=1e-09,
+               estimate_sigma=True):
         """
-        Main function to run the MMSuSiE analysis.
+        End-to-end GxE fine-mapping workflow.
+
+        Runs read_data → read_sp_grm → cal_spVi → get_env_int → get_genotype →
+        get_y (GLS for covariates + E) → GLS residualize G → mmsusie on GxE → out_mmsusie.
 
         Args:
-            pheno_file (str): Path to the phenotype data file.
+            pheno_file (str): Path to phenotype data file (space/tab separated).
             trait (str): Column name of the target trait.
-            env_int (list): List of column names for interacting environmental covariates.
-            grm_file (str): Prefix path to the GRM files.
-            bedfile (str): Path to the plink binary file.
-            snp_id (str): SNP ID to include in the genotype matrix.
-            varcom_file (str): Path to the file containing variance components.
-            out_file (str): Path to the output file.
-            L (int, optional): Maximum number of non-zero effects. Defaults to 10.
-            maxiter (int, optional): Maximum number of iterations. Defaults to 100.
-            tol (float, optional): Convergence tolerance for ELBO. Defaults to 1e-3.
-            coverage (float, optional): Credible set coverage. Defaults to 0.95.
-            min_abs_corr (float, optional): Minimum absolute correlation for credible set purity. Defaults to 0.5.
-            prior_tol (float, optional): Tolerance for filtering prior components. Defaults to 1e-09.
+            env_int (list): Column names for GxE interacting environmental covariates.
+            grm_file (str): Prefix for the sparse GRM files.
+            bedfile (str): Prefix for PLINK binary files (.bed/.bim/.fam).
+            snp_id (str): Single SNP ID for GxE analysis.
+            varcom_file (str): Path to file containing variance components [sigma_g2, sigma_e2].
+            out_file (str): Output file prefix for result tables.
+            L (int): Maximum number of non-zero effects. Defaults to 10.
+            maxiter (int): Maximum IBSS iterations. Defaults to 100.
+            tol (float): ELBO convergence tolerance. Defaults to 1e-3.
+            coverage (float): Credible set coverage. Defaults to 0.95.
+            min_abs_corr (float): Minimum absolute correlation for credible set purity. Defaults to 0.5.
+            prior_tol (float): Tolerance for filtering prior components. Defaults to 1e-09.
+            estimate_sigma (bool): If True, jointly re-estimate variance components during IBSS. Defaults to True.
 
         Returns:
-            dict: Results from the MMSuSiE analysis.
+            dict: Results from mmsusie().
         """
-        # Step 1: Read and preprocess data
         self.read_data(pheno_file, trait, env_int)
-
-        # Step 2: Read GRM and align with phenotype data
         self.read_sp_grm(grm_file)
 
-        # Step 3: Extract environmental covariates and phenotype
-        E = self.get_env_int(scale=True)            # (n, K)
-
-        # Step 4: Get genotype matrix (force (n,1) for single SNP)
-        G = self.get_genotype(bedfile, [snp_id], scale=True)
-
-        # Build main-effects design with intercept
-        n = G.shape[0]
-        X = np.hstack((np.ones((n, 1)), G, E))       # (n, 1+1+K)
-
-        # Phenotype, then project out main effects (OLS-safe; see GLS note below)
-        y = self.get_y(adjust=False, scale=False)
-        XtX = X.T @ X
-        Xty = X.T @ y
-        # Solve (X'X) beta = X'y
-        beta = np.linalg.solve(XtX, Xty)
-        y = y - X @ beta
-
-        # Standardize y
-        y = (y - np.mean(y)) / np.std(y)
-
-        # Step 5: Load variance components and calculate Vi and log|V|
         _vc = np.loadtxt(varcom_file)
         varcom = _vc[:, 0] if _vc.ndim == 2 else _vc
         self.cal_spVi(varcom)
 
-        # Step 6: Build GE interactions
-        GE = G * E                                   # (n, K), broadcasts over K envs
+        E = self.get_env_int(scale=True)
+        G = self.get_genotype(bedfile, sid_lst=[snp_id], scale=True)
 
-        # Step 7: Run MMSuSiE on GE interactions
+        # get_y adjusts for [1, covariates, categoricals, E] via GLS
+        y = self.get_y(adjust=True)
+
+        # Additionally project out G main effect via GLS (FWL: sequential == joint)
+        Vi_G = self.Vi @ G
+        if scipy.sparse.issparse(Vi_G):
+            Vi_G = Vi_G.toarray()
+        beta_G = np.linalg.solve(G.T @ Vi_G, Vi_G.T @ y)
+        y = y - G @ beta_G
+
+        GE = G * E
         res = self.mmsusie(GE, y, L=L, maxiter=maxiter, tol=tol, coverage=coverage,
-                        min_abs_corr=min_abs_corr, prior_tol=prior_tol)
+                           min_abs_corr=min_abs_corr, prior_tol=prior_tol,
+                           estimate_sigma=estimate_sigma)
         self.out_mmsusie(res, out_file)
         return res
 
@@ -387,64 +378,46 @@ class MMSuSiESp:
             self.env_int_arr2 = (self.env_int_arr2 - mean_arr) / std_arr
         return self.env_int_arr2
     
-    def get_y(self, adjust=True, scale=True):
+    def get_y(self, adjust=True):
         """
         Get the target trait values, optionally adjusting for fixed effects.
 
         Uses GLS (β̂ = (X'V⁻¹X)⁻¹X'V⁻¹y) when ``cal_spVi()`` has been called,
         otherwise falls back to OLS.
 
-        Adjustment priority:
-        - If ``covariate_cols`` / ``categorical_cols`` were given to ``read_data``,
-          projects out those columns (plus intercept).
-        - If ``env_int`` were given, projects out ``env_int_arr2`` (requires
-          ``get_env_int()`` to have been called first).
+        When ``adjust=True``, projects out intercept plus all of:
+        ``covariate_cols``, ``categorical_cols`` (one-hot encoded), and
+        ``env_int_arr2`` (if ``get_env_int()`` has been called first).
 
         Args:
             adjust (bool): Whether to project out fixed effects. Defaults to True.
-            scale (bool): Whether to standardize (mean 0, std 1). Defaults to True.
 
         Returns:
             np.ndarray: Trait values (n,).
         """
         y = self.df.loc[:, self.trait].values
         if adjust:
-            if self.covariate_cols or self.categorical_cols:
-                x_blocks = [np.ones((len(y), 1))]
-                if self.covariate_cols:
-                    x_blocks.append(self.df.loc[:, self.covariate_cols].values)
-                if self.categorical_cols:
-                    cat_df = pd.get_dummies(
-                        self.df[self.categorical_cols].astype("category"),
-                        drop_first=True, dtype=float,
-                    )
-                    if cat_df.shape[1] > 0:
-                        x_blocks.append(cat_df.values)
-                xmat = np.hstack(x_blocks)
-                if self.Vi is not None:
-                    # GLS: β̂ = (X'V⁻¹X)⁻¹X'V⁻¹y
-                    Vi_xmat = self.Vi @ xmat
-                    if scipy.sparse.issparse(Vi_xmat):
-                        Vi_xmat = Vi_xmat.toarray()
-                    beta = np.linalg.solve(xmat.T @ Vi_xmat, Vi_xmat.T @ y)
-                else:
-                    # OLS fallback when Vi not yet available
-                    beta = np.linalg.lstsq(xmat, y, rcond=None)[0]
-                y = y - xmat @ beta
-            elif self.env_int_arr2 is not None and len(self.env_int) > 0:
-                if self.Vi is not None:
-                    Vi_e = self.Vi @ self.env_int_arr2
-                    if scipy.sparse.issparse(Vi_e):
-                        Vi_e = Vi_e.toarray()
-                    beta = np.linalg.solve(self.env_int_arr2.T @ Vi_e, Vi_e.T @ y)
-                else:
-                    beta = np.linalg.solve(
-                        self.env_int_arr2.T @ self.env_int_arr2,
-                        self.env_int_arr2.T @ y,
-                    )
-                y = y - self.env_int_arr2 @ beta
-        if scale:
-            y = (y - np.mean(y)) / np.std(y)
+            x_blocks = [np.ones((len(y), 1))]
+            if self.covariate_cols:
+                x_blocks.append(self.df.loc[:, self.covariate_cols].values)
+            if self.categorical_cols:
+                cat_df = pd.get_dummies(
+                    self.df[self.categorical_cols].astype("category"),
+                    drop_first=True, dtype=float,
+                )
+                if cat_df.shape[1] > 0:
+                    x_blocks.append(cat_df.values)
+            if self.env_int_arr2 is not None and len(self.env_int) > 0:
+                x_blocks.append(self.env_int_arr2)
+            xmat = np.hstack(x_blocks)
+            if self.Vi is not None:
+                Vi_xmat = self.Vi @ xmat
+                if scipy.sparse.issparse(Vi_xmat):
+                    Vi_xmat = Vi_xmat.toarray()
+                beta = np.linalg.solve(xmat.T @ Vi_xmat, Vi_xmat.T @ y)
+            else:
+                beta = np.linalg.lstsq(xmat, y, rcond=None)[0]
+            y = y - xmat @ beta
         return y
     
     def get_genotype(self, bedfile, sid_lst=None, scale=True, *, start=None, end=None):
@@ -603,7 +576,7 @@ class MMSuSiESp:
         self.V_logdet = V_logdet
     
     def mmsusie(self, X, y, L=10, maxiter=100, tol=1e-3, coverage=0.95,
-                min_abs_corr=0.5, prior_tol=1e-09, estimate_sigma=False):
+                min_abs_corr=0.5, prior_tol=1e-09, estimate_sigma=True):
         p = X.shape[1]
         n = X.shape[0]
         if p < L:

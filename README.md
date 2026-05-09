@@ -174,8 +174,8 @@ ms.read_sp_grm("output/test")
 varcom = np.loadtxt("output/test_main.var")  # [sigma_g2, sigma_e2]
 ms.cal_spVi(varcom)
 
-# 3) Prepare y using GLS (regress out covariates with V^{-1} weighting, then standardize)
-y = ms.get_y(adjust=True, scale=True)
+# 3) Prepare y using GLS (regress out covariates with V^{-1} weighting)
+y = ms.get_y(adjust=True)
 
 # 4) Load genotype for region of interest
 G = ms.get_genotype("test", start="rs11132426", end="rs7694910")

@@ -50,8 +50,8 @@ def compute_all_XtViX(G, E, Vi_sp, n_jobs=32, regularize=0.001):
     - regularize (float): Diagonal regularization coefficient
 
     Returns:
-    - Shat_lst (list of ndarray): List of XtViX matrices (J items, each K x K)
     - Shat_inv_lst (list of ndarray): List of XtViX inverses (J items, each K x K)
+    - Shat_lst (list of ndarray): List of XtViX matrices (J items, each K x K)
     - logdet_S_hat_lst (ndarray): Array of log-determinants of inverses (length J)
     """
     J = G.shape[1]  # Total number of SNPs

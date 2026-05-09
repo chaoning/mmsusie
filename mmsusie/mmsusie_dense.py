@@ -306,7 +306,7 @@ class MMSuSiEDense:
         self.varcom = np.array([sigma_g2, sigma_e2], dtype=float)
 
     def fit(self, X, y, L=10, maxiter=100, tol=1e-3, coverage=0.95,
-                min_abs_corr=0.5, prior_tol=1e-09, pip_index=None, estimate_sigma=False):
+                min_abs_corr=0.5, prior_tol=1e-09, pip_index=None, estimate_sigma=True):
         p = X.shape[1]
         n = X.shape[0]
         if p < L:
@@ -372,7 +372,7 @@ class MMSuSiEDense:
                 
                 post_var_arr = 1 / (1 / sigma0 + 1 / shat2s) # Posterior variance.
                 post_mean_arr = betahats / shat2s * post_var_arr
-                post_mean2_arr = post_var_arr + post_mean_arr * post_mean_arr; # Second moment.
+                post_mean2_arr = post_var_arr + post_mean_arr * post_mean_arr  # Second moment.
 
                 # update
                 mu_arr2[l, :] = post_mean_arr
