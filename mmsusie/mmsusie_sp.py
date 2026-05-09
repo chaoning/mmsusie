@@ -23,24 +23,34 @@ from collections import defaultdict
 from tqdm import tqdm
 
 
-def _sigma_neg_loglik_and_grad_sp(varcom, grm_blocks, y, X, Xresi, alpha_arr2, mu_arr2, mu2_arr2):
+def _sigma_neg_loglik_and_grad_sp(varcom, grm_blocks, y, X, Xresi, alpha_arr2, mu_arr2, mu2_arr2,
+                                   env_int_arr2=None):
     """
-    Negative log-likelihood and gradient w.r.t. [sigma_g2, sigma_e2] for a
-    sparse block-diagonal GRM.  V = sigma_g2 * GRM + sigma_e2 * I, computed
-    block-by-block.
+    Negative log-likelihood and gradient w.r.t. variance components for a
+    sparse block-diagonal GRM.  Mirrors the four cases of cal_spVi:
 
-    grm_blocks[0]  — 1-D array of diagonal GRM values for singleton individuals.
+      len==1: V = σ_e² I
+      len==2: V = σ_g² GRM + σ_e² I
+      len==3: V = σ_g² GRM + σ_gxe² (GRM ⊙ EE'/K) + σ_e² I
+      len==4: V = σ_g² GRM + σ_gxe² (GRM ⊙ EE'/K) + σ_gxe2_E diag(‖e‖²/K) + σ_e² I
+
+    grm_blocks[0]  — 1-D diagonal GRM values for singleton individuals.
     grm_blocks[1:] — 2-D dense GRM sub-matrices for related groups.
+    env_int_arr2   — (n, K) environment matrix; required when len(varcom) >= 3.
     """
-    sigma_g2, sigma_e2 = varcom
+    nvc = len(varcom)
     r = y - Xresi
     delta = (np.sum(alpha_arr2 * mu2_arr2, axis=0)
              - np.sum(np.square(alpha_arr2 * mu_arr2), axis=0))
 
+    if nvc >= 3:
+        num_envi_int = env_int_arr2.shape[1]
+        nxe_arr = np.sum(env_int_arr2 ** 2, axis=1) / num_envi_int  # (n,)
+
     V_logdet = 0.0
     rVir = 0.0
     xtVix = np.zeros(X.shape[1])
-    grad = np.zeros(2)
+    grad = np.zeros(nvc)
 
     start = 0
     for i, G_b in enumerate(grm_blocks):
@@ -48,37 +58,68 @@ def _sigma_neg_loglik_and_grad_sp(varcom, grm_blocks, y, X, Xresi, alpha_arr2, m
             nb = len(G_b)
             if nb == 0:
                 continue
-            v_diag = G_b * sigma_g2 + sigma_e2
+
+            if nvc >= 3:
+                nxe_b  = nxe_arr[start:start + nb]
+                gxe_b  = nxe_b * G_b        # diag of GRM ⊙ EE'/K
+
+            if nvc == 1:
+                v_diag = np.full(nb, varcom[0])
+                A_diags = [np.ones(nb)]
+            elif nvc == 2:
+                v_diag  = G_b * varcom[0] + varcom[1]
+                A_diags = [G_b, np.ones(nb)]
+            elif nvc == 3:
+                v_diag  = G_b * varcom[0] + gxe_b * varcom[1] + varcom[2]
+                A_diags = [G_b, gxe_b, np.ones(nb)]
+            else:
+                v_diag  = G_b * varcom[0] + gxe_b * varcom[1] + nxe_b * varcom[2] + varcom[3]
+                A_diags = [G_b, gxe_b, nxe_b, np.ones(nb)]
+
             if np.any(v_diag <= 0):
-                return np.inf, np.full(2, np.inf)
+                return np.inf, np.full(nvc, np.inf)
             vi_diag = 1.0 / v_diag
             V_logdet += np.sum(np.log(v_diag))
 
-            r_b  = r[start:start + nb]
-            X_b  = X[start:start + nb, :]
-            vir_b = vi_diag * r_b           # Vi @ r  (diagonal Vi)
-            viX_b = vi_diag[:, None] * X_b  # Vi @ X  (diagonal Vi)
+            r_b   = r[start:start + nb]
+            X_b   = X[start:start + nb, :]
+            vir_b = vi_diag * r_b
+            viX_b = vi_diag[:, None] * X_b
 
-            rVir   += np.dot(vir_b, r_b)
-            xtVix  += np.einsum('ij,ij->j', X_b, viX_b)
+            rVir  += np.dot(vir_b, r_b)
+            xtVix += np.einsum('ij,ij->j', X_b, viX_b)
 
-            # grad sigma_g2
-            grad[0] += 0.5 * np.dot(vi_diag, G_b)
-            grad[0] -= 0.5 * np.dot(vir_b ** 2, G_b)
-            ViGViX_b = (vi_diag ** 2 * G_b)[:, None] * X_b
-            grad[0] -= 0.5 * np.dot(delta, np.einsum('ij,ij->j', X_b, ViGViX_b))
+            for k, a_d in enumerate(A_diags):
+                grad[k] += 0.5 * np.dot(vi_diag, a_d)
+                grad[k] -= 0.5 * np.dot(vir_b ** 2, a_d)
+                ViAViX_b = (vi_diag ** 2 * a_d)[:, None] * X_b
+                grad[k] -= 0.5 * np.dot(delta, np.einsum('ij,ij->j', X_b, ViAViX_b))
 
-            # grad sigma_e2
-            grad[1] += 0.5 * np.sum(vi_diag)
-            grad[1] -= 0.5 * np.dot(vir_b, vir_b)
-            Vi2X_b = vi_diag[:, None] ** 2 * X_b
-            grad[1] -= 0.5 * np.dot(delta, np.einsum('ij,ij->j', X_b, Vi2X_b))
         else:                               # dense block
-            nb  = G_b.shape[0]
-            V_b = G_b * sigma_g2 + np.eye(nb) * sigma_e2
+            nb = G_b.shape[0]
+
+            if nvc >= 3:
+                env_b = env_int_arr2[start:start + nb, :]
+                GxE_b = (env_b @ env_b.T) / num_envi_int * G_b
+                nxe_b = nxe_arr[start:start + nb]
+
+            if nvc == 1:
+                V_b    = np.eye(nb) * varcom[0]
+                A_mats = [np.eye(nb)]
+            elif nvc == 2:
+                V_b    = G_b * varcom[0] + np.eye(nb) * varcom[1]
+                A_mats = [G_b, np.eye(nb)]
+            elif nvc == 3:
+                V_b    = G_b * varcom[0] + GxE_b * varcom[1] + np.eye(nb) * varcom[2]
+                A_mats = [G_b, GxE_b, np.eye(nb)]
+            else:
+                V_b    = (G_b * varcom[0] + GxE_b * varcom[1]
+                          + np.diag(nxe_b) * varcom[2] + np.eye(nb) * varcom[3])
+                A_mats = [G_b, GxE_b, np.diag(nxe_b), np.eye(nb)]
+
             sign, logdet = np.linalg.slogdet(V_b)
             if sign <= 0:
-                return np.inf, np.full(2, np.inf)
+                return np.inf, np.full(nvc, np.inf)
             V_logdet += logdet
             Vi_b = np.linalg.inv(V_b)
 
@@ -90,17 +131,11 @@ def _sigma_neg_loglik_and_grad_sp(varcom, grm_blocks, y, X, Xresi, alpha_arr2, m
             rVir  += np.dot(vir_b, r_b)
             xtVix += np.einsum('ij,ij->j', X_b, viX_b)
 
-            # grad sigma_g2
-            grad[0] += 0.5 * np.sum(Vi_b * G_b)
-            grad[0] -= 0.5 * (vir_b @ (G_b @ vir_b))
-            ViGViX_b = G_b @ viX_b
-            grad[0] -= 0.5 * np.dot(delta, np.einsum('ij,ij->j', viX_b, ViGViX_b))
-
-            # grad sigma_e2
-            grad[1] += 0.5 * np.trace(Vi_b)
-            grad[1] -= 0.5 * np.dot(vir_b, vir_b)
-            Vi2X_b = Vi_b @ viX_b
-            grad[1] -= 0.5 * np.dot(delta, np.einsum('ij,ij->j', viX_b, Vi2X_b))
+            for k, A_k in enumerate(A_mats):
+                grad[k] += 0.5 * np.sum(Vi_b * A_k)
+                grad[k] -= 0.5 * (vir_b @ (A_k @ vir_b))
+                ViAViX_b = A_k @ viX_b
+                grad[k] -= 0.5 * np.dot(delta, np.einsum('ij,ij->j', viX_b, ViAViX_b))
 
         start += nb
 
@@ -584,10 +619,10 @@ class MMSuSiESp:
         yVar = np.var(y)
 
         if estimate_sigma:
-            if self.varcom is None or len(self.varcom) != 2:
+            if self.varcom is None or len(self.varcom) not in (1, 2, 3, 4):
                 raise ValueError(
-                    "estimate_sigma=True requires exactly 2 variance components; "
-                    "call cal_spVi() with a [sigma_g2, sigma_e2] varcom first."
+                    "estimate_sigma=True requires 1–4 variance components; "
+                    "call cal_spVi() first."
                 )
 
         # Local copies updated when estimate_sigma re-estimates V.
@@ -671,13 +706,15 @@ class MMSuSiESp:
                 break
 
             if estimate_sigma:
+                nvc = len(self.varcom)
                 res_sigma = minimize(
                     _sigma_neg_loglik_and_grad_sp,
                     x0=self.varcom.copy(),
-                    args=(self.grm_blocks, y, X, Xresi, alpha_arr2, mu_arr2, mu2_arr2),
+                    args=(self.grm_blocks, y, X, Xresi, alpha_arr2, mu_arr2, mu2_arr2,
+                          self.env_int_arr2),
                     jac=True,
                     method="L-BFGS-B",
-                    bounds=[(1e-10, None), (1e-10, None)],
+                    bounds=[(1e-10, None)] * nvc,
                 )
                 if res_sigma.success:
                     self.varcom = res_sigma.x
@@ -691,7 +728,7 @@ class MMSuSiESp:
                     vX = vX.toarray()
                 xtVix = np.einsum('ij,ij->j', X, vX)
                 shat2s = 1 / xtVix
-                logging.info(f"Updated variances: sigma_g2={self.varcom[0]:.6g}, sigma_e2={self.varcom[1]:.6g}")
+                logging.info(f"Updated varcom: {self.varcom}")
         
         alpha_arr2, mu_arr2 = filter_prior_components_mmsusie(alpha_arr2, mu_arr2, sigma0_arr, prior_tol)
         if self.last_snp_ids is not None and len(self.last_snp_ids) == p:
