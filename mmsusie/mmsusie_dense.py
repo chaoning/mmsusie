@@ -43,12 +43,14 @@ def _sigma_neg_loglik_and_grad(varcom, gmat, y, X, Xresi, alpha_arr2, mu_arr2, m
     r = y - Xresi
     Vir = Vi @ r
     ViX = Vi @ X
-    xtVix = np.einsum('ij,ij->j', X, ViX)
+    xtVix = X.T @ ViX
 
-    # SuSiE posterior correction: Σₗ αₗⱼ μ²ₗⱼ - Σₗ (αₗⱼ μₗⱼ)²
-    delta = np.sum(alpha_arr2 * mu2_arr2, axis=0) - np.sum(np.square(alpha_arr2 * mu_arr2), axis=0)
+    # SuSiE posterior correction:
+    # sum_l {diag(alpha_l * mu2_l) - (alpha_l * mu_l)(alpha_l * mu_l)'}.
+    mean_arr2 = alpha_arr2 * mu_arr2
+    correction_mat = np.diag(np.sum(alpha_arr2 * mu2_arr2, axis=0)) - mean_arr2.T @ mean_arr2
 
-    neg_ll = 0.5 * logdet + 0.5 * (r @ Vir + np.dot(delta, xtVix))
+    neg_ll = 0.5 * logdet + 0.5 * (r @ Vir + np.sum(xtVix * correction_mat))
 
     grad = np.zeros(2)
 
@@ -56,13 +58,13 @@ def _sigma_neg_loglik_and_grad(varcom, gmat, y, X, Xresi, alpha_arr2, mu_arr2, m
     Vi_G_ViX = Vi @ (gmat @ ViX)
     grad[0] = (0.5 * np.sum(Vi * gmat)
                - 0.5 * (Vir @ (gmat @ Vir))
-               - 0.5 * np.dot(delta, np.einsum('ij,ij->j', X, Vi_G_ViX)))
+               - 0.5 * np.sum((X.T @ Vi_G_ViX) * correction_mat))
 
     # dV/d(sigma_e2) = I  →  Vi dV Vi = Vi²
     Vi2X = Vi @ ViX
     grad[1] = (0.5 * np.trace(Vi)
                - 0.5 * (Vir @ Vir)
-               - 0.5 * np.dot(delta, np.einsum('ij,ij->j', X, Vi2X)))
+               - 0.5 * np.sum((X.T @ Vi2X) * correction_mat))
 
     return neg_ll, grad
 
@@ -326,7 +328,11 @@ class MMSuSiEDense:
         if scipy.sparse.issparse(vX):
             vX = vX.toarray()
 
-        xtVix = np.einsum('ij,ij->j', X, vX)
+        xtVix_mat = X.T @ vX
+        xtVix = np.diag(xtVix_mat)
+        if np.any(~np.isfinite(xtVix)) or np.any(xtVix <= 0):
+            bad = np.where((~np.isfinite(xtVix)) | (xtVix <= 0))[0]
+            raise ValueError(f"Non-positive or non-finite X'V^-1X diagonal entries at columns: {bad.tolist()}")
         shat2s = 1 / xtVix
         logging.info(f"shat2s: {shat2s[:5].T}")
 
@@ -364,7 +370,10 @@ class MMSuSiEDense:
                     sigma0 = res.x[0]
                     sigma0_arr[l] = sigma0
                 else:
-                    logging.warning("Optimization of priors failed; using priors from the previous iteration.")
+                    logging.warning(
+                        "Optimization of priors failed (%s); using priors from the previous iteration.",
+                        res.message,
+                    )
                 
                 alpha_arr, lbf_model = calAlpha([sigma0], betahats, shat2s, prior_weights)
                 loglik = lbf_model - 0.5 * n * np.log(2 * np.pi) - 0.5 * V_logdet - \
@@ -388,10 +397,14 @@ class MMSuSiEDense:
                 Xresi = Xresi + X @ (alpha_arr * post_mean_arr)
             
             logging.info(f"Estimated prior variances: {sigma0_arr.T}")
+            mean_arr2 = alpha_arr2 * mu_arr2
+            posterior_correction = (
+                np.sum(np.sum(alpha_arr2 * mu2_arr2, axis=0) * xtVix)
+                - np.sum((mean_arr2 @ xtVix_mat) * mean_arr2)
+            )
             elbo_arr[iter + 1] = - 0.5 * n * np.log(2 * np.pi) - 0.5 * V_logdet \
-                    - 0.5 * ( (y - Xresi) @ (Vi @ (y - Xresi)) +
-                    np.sum(np.sum(alpha_arr2 * mu2_arr2, axis=0) * xtVix) -
-                    np.sum(np.sum(np.square(alpha_arr2 * mu_arr2), axis=0) * xtVix)) - np.sum(KL_arr)
+                    - 0.5 * ((y - Xresi) @ (Vi @ (y - Xresi)) +
+                    posterior_correction) - np.sum(KL_arr)
             logging.info(f"ELBO: {elbo_arr[iter + 1]}")
             if np.absolute(elbo_arr[iter + 1] - elbo_arr[iter]) < tol:
                 break
@@ -416,7 +429,11 @@ class MMSuSiEDense:
                 self.Vi = Vi
                 self.V_logdet = V_logdet
                 vX = Vi @ X
-                xtVix = np.einsum('ij,ij->j', X, vX)
+                xtVix_mat = X.T @ vX
+                xtVix = np.diag(xtVix_mat)
+                if np.any(~np.isfinite(xtVix)) or np.any(xtVix <= 0):
+                    bad = np.where((~np.isfinite(xtVix)) | (xtVix <= 0))[0]
+                    raise ValueError(f"Non-positive or non-finite X'V^-1X diagonal entries at columns: {bad.tolist()}")
                 shat2s = 1 / xtVix
                 logging.info(f"Updated variances: sigma_g2={self.varcom[0]:.6g}, sigma_e2={self.varcom[1]:.6g}")
         

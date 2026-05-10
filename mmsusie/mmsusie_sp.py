@@ -40,8 +40,10 @@ def _sigma_neg_loglik_and_grad_sp(varcom, grm_blocks, y, X, Xresi, alpha_arr2, m
     """
     nvc = len(varcom)
     r = y - Xresi
-    delta = (np.sum(alpha_arr2 * mu2_arr2, axis=0)
-             - np.sum(np.square(alpha_arr2 * mu_arr2), axis=0))
+    # SuSiE posterior correction:
+    # sum_l {diag(alpha_l * mu2_l) - (alpha_l * mu_l)(alpha_l * mu_l)'}.
+    mean_arr2 = alpha_arr2 * mu_arr2
+    correction_mat = np.diag(np.sum(alpha_arr2 * mu2_arr2, axis=0)) - mean_arr2.T @ mean_arr2
 
     if nvc >= 3:
         num_envi_int = env_int_arr2.shape[1]
@@ -49,7 +51,7 @@ def _sigma_neg_loglik_and_grad_sp(varcom, grm_blocks, y, X, Xresi, alpha_arr2, m
 
     V_logdet = 0.0
     rVir = 0.0
-    xtVix = np.zeros(X.shape[1])
+    xtVix = np.zeros((X.shape[1], X.shape[1]))
     grad = np.zeros(nvc)
 
     start = 0
@@ -87,13 +89,13 @@ def _sigma_neg_loglik_and_grad_sp(varcom, grm_blocks, y, X, Xresi, alpha_arr2, m
             viX_b = vi_diag[:, None] * X_b
 
             rVir  += np.dot(vir_b, r_b)
-            xtVix += np.einsum('ij,ij->j', X_b, viX_b)
+            xtVix += X_b.T @ viX_b
 
             for k, a_d in enumerate(A_diags):
                 grad[k] += 0.5 * np.dot(vi_diag, a_d)
                 grad[k] -= 0.5 * np.dot(vir_b ** 2, a_d)
                 ViAViX_b = (vi_diag ** 2 * a_d)[:, None] * X_b
-                grad[k] -= 0.5 * np.dot(delta, np.einsum('ij,ij->j', X_b, ViAViX_b))
+                grad[k] -= 0.5 * np.sum((X_b.T @ ViAViX_b) * correction_mat)
 
         else:                               # dense block
             nb = G_b.shape[0]
@@ -129,17 +131,17 @@ def _sigma_neg_loglik_and_grad_sp(varcom, grm_blocks, y, X, Xresi, alpha_arr2, m
             viX_b = Vi_b @ X_b
 
             rVir  += np.dot(vir_b, r_b)
-            xtVix += np.einsum('ij,ij->j', X_b, viX_b)
+            xtVix += X_b.T @ viX_b
 
             for k, A_k in enumerate(A_mats):
                 grad[k] += 0.5 * np.sum(Vi_b * A_k)
                 grad[k] -= 0.5 * (vir_b @ (A_k @ vir_b))
                 ViAViX_b = A_k @ viX_b
-                grad[k] -= 0.5 * np.dot(delta, np.einsum('ij,ij->j', viX_b, ViAViX_b))
+                grad[k] -= 0.5 * np.sum((viX_b.T @ ViAViX_b) * correction_mat)
 
         start += nb
 
-    neg_ll = 0.5 * V_logdet + 0.5 * (rVir + np.dot(delta, xtVix))
+    neg_ll = 0.5 * V_logdet + 0.5 * (rVir + np.sum(xtVix * correction_mat))
     return neg_ll, grad
 
 
@@ -165,12 +167,13 @@ class MMSuSiESp:
     
     def mmsusie_lead_gxe(self, pheno_file, trait, env_int, grm_file, bedfile, snp_id, varcom_file, out_file,
                L=10, maxiter=100, tol=1e-3, coverage=0.95, min_abs_corr=0.5, prior_tol=1e-09,
-               estimate_sigma=True):
+               estimate_sigma=False, covariate_cols=None, categorical_cols=None, iid_col=0):
         """
         End-to-end GxE fine-mapping workflow.
 
-        Runs read_data → read_sp_grm → cal_spVi → get_env_int → get_genotype →
-        get_y (GLS for covariates + E) → GLS residualize G → mmsusie on GxE → out_mmsusie.
+        Runs read_data -> read_sp_grm -> get_env_int -> cal_spVi -> get_genotype,
+        then GLS-residualizes y and GxE against [1, covariates, categoricals, E, G],
+        runs mmsusie on residualized GxE, and writes out_mmsusie outputs.
 
         Args:
             pheno_file (str): Path to phenotype data file (space/tab separated).
@@ -179,7 +182,7 @@ class MMSuSiESp:
             grm_file (str): Prefix for the sparse GRM files.
             bedfile (str): Prefix for PLINK binary files (.bed/.bim/.fam).
             snp_id (str): Single SNP ID for GxE analysis.
-            varcom_file (str): Path to file containing variance components [sigma_g2, sigma_e2].
+            varcom_file (str): Path to file containing 1-4 variance components.
             out_file (str): Output file prefix for result tables.
             L (int): Maximum number of non-zero effects. Defaults to 10.
             maxiter (int): Maximum IBSS iterations. Defaults to 100.
@@ -187,36 +190,91 @@ class MMSuSiESp:
             coverage (float): Credible set coverage. Defaults to 0.95.
             min_abs_corr (float): Minimum absolute correlation for credible set purity. Defaults to 0.5.
             prior_tol (float): Tolerance for filtering prior components. Defaults to 1e-09.
-            estimate_sigma (bool): If True, jointly re-estimate variance components during IBSS. Defaults to True.
+            estimate_sigma (bool): If True, jointly re-estimate variance components during IBSS. Defaults to False.
+            covariate_cols (list or None): Numeric fixed-effect covariates. Defaults to None.
+            categorical_cols (list or None): Categorical fixed-effect covariates. Defaults to None.
+            iid_col (int): Index of the IID column in pheno_file. Defaults to 0.
 
         Returns:
             dict: Results from mmsusie().
         """
-        self.read_data(pheno_file, trait, env_int)
+        if len(env_int) == 0:
+            raise ValueError("`env_int` must contain at least one environmental covariate.")
+
+        self.read_data(
+            pheno_file,
+            trait,
+            env_int,
+            covariate_cols=[] if covariate_cols is None else covariate_cols,
+            categorical_cols=[] if categorical_cols is None else categorical_cols,
+            iid_col=iid_col,
+        )
         self.read_sp_grm(grm_file)
 
         E = self.get_env_int(scale=True)
 
         _vc = np.loadtxt(varcom_file)
-        varcom = _vc[:, 0] if _vc.ndim == 2 else _vc
+        if np.ndim(_vc) == 0:
+            varcom = np.array([float(_vc)])
+        elif _vc.ndim == 1:
+            varcom = np.asarray(_vc, dtype=float)
+        elif 1 in _vc.shape:
+            varcom = np.asarray(_vc, dtype=float).reshape(-1)
+        else:
+            varcom = np.asarray(_vc[:, 0], dtype=float)
+        if len(varcom) not in (1, 2, 3, 4):
+            raise ValueError(f"`varcom_file` must contain 1-4 variance components; got {len(varcom)}.")
         self.cal_spVi(varcom)
         G = self.get_genotype(bedfile, sid_lst=[snp_id], scale=True)
-
-        # get_y adjusts for [1, covariates, categoricals, E] via GLS
-        y = self.get_y(adjust=True)
-
-        # Additionally project out G main effect via GLS (FWL: sequential == joint)
-        Vi_G = self.Vi @ G
-        if scipy.sparse.issparse(Vi_G):
-            Vi_G = Vi_G.toarray()
-        beta_G = np.linalg.solve(G.T @ Vi_G, Vi_G.T @ y)
-        y = y - G @ beta_G
+        lead_snp_ids = self.last_snp_ids
 
         GE = G * E
-        res = self.mmsusie(GE, y, L=L, maxiter=maxiter, tol=tol, coverage=coverage,
-                           min_abs_corr=min_abs_corr, prior_tol=prior_tol,
-                           estimate_sigma=estimate_sigma)
-        self.out_mmsusie(res, out_file)
+        y_raw = self.df.loc[:, self.trait].values
+
+        nuisance_blocks = [np.ones((len(y_raw), 1))]
+        if self.covariate_cols:
+            nuisance_blocks.append(self.df.loc[:, self.covariate_cols].values)
+        if self.categorical_cols:
+            cat_df = pd.get_dummies(
+                self.df[self.categorical_cols].astype("category"),
+                drop_first=True, dtype=float,
+            )
+            if cat_df.shape[1] > 0:
+                nuisance_blocks.append(cat_df.values)
+        nuisance_blocks.extend([E, G])
+        nuisance = np.hstack(nuisance_blocks)
+
+        def gls_residualize(target):
+            target_arr = np.asarray(target)
+            was_1d = target_arr.ndim == 1
+            if was_1d:
+                target_arr = target_arr[:, None]
+            Vi_nuisance = self.Vi @ nuisance
+            Vi_target = self.Vi @ target_arr
+            if scipy.sparse.issparse(Vi_nuisance):
+                Vi_nuisance = Vi_nuisance.toarray()
+            if scipy.sparse.issparse(Vi_target):
+                Vi_target = Vi_target.toarray()
+            gram = nuisance.T @ Vi_nuisance
+            rhs = nuisance.T @ Vi_target
+            if np.linalg.matrix_rank(gram) < gram.shape[0]:
+                beta = np.linalg.pinv(gram) @ rhs
+            else:
+                beta = np.linalg.solve(gram, rhs)
+            resid = target_arr - nuisance @ beta
+            return resid.ravel() if was_1d else resid
+
+        y = gls_residualize(y_raw)
+        GE = gls_residualize(GE)
+        self.last_snp_ids = None
+        try:
+            res = self.mmsusie(GE, y, L=L, maxiter=maxiter, tol=tol, coverage=coverage,
+                               min_abs_corr=min_abs_corr, prior_tol=prior_tol,
+                               estimate_sigma=estimate_sigma)
+            res["lead_snp"] = lead_snp_ids[0] if lead_snp_ids else str(snp_id)
+            self.out_mmsusie(res, out_file)
+        finally:
+            self.last_snp_ids = lead_snp_ids
         return res
 
     def ld_pure(self, assoc_file, bed_file, ld_r2=0.1, snp="SNP", p="p_gxe", p_cutoff=5e-8):
@@ -410,6 +468,7 @@ class MMSuSiESp:
         if scale:
             mean_arr = np.mean(self.env_int_arr2, axis=0).reshape(1, -1)
             std_arr = np.std(self.env_int_arr2, axis=0).reshape(1, -1)
+            std_arr[std_arr == 0] = 1.0
             self.env_int_arr2 = (self.env_int_arr2 - mean_arr) / std_arr
         return self.env_int_arr2
     
@@ -637,7 +696,11 @@ class MMSuSiESp:
         if scipy.sparse.issparse(vX):
             vX = vX.toarray()
 
-        xtVix = np.einsum('ij,ij->j', X, vX)
+        xtVix_mat = X.T @ vX
+        xtVix = np.diag(xtVix_mat)
+        if np.any(~np.isfinite(xtVix)) or np.any(xtVix <= 0):
+            bad = np.where((~np.isfinite(xtVix)) | (xtVix <= 0))[0]
+            raise ValueError(f"Non-positive or non-finite X'V^-1X diagonal entries at columns: {bad.tolist()}")
         shat2s = 1 / xtVix
         logging.info(f"shat2s: {shat2s[:5].T}")
 
@@ -675,7 +738,10 @@ class MMSuSiESp:
                     sigma0 = res.x[0]
                     sigma0_arr[l] = sigma0
                 else:
-                    logging.warning("Optimization of priors failed; using priors from the previous iteration.")
+                    logging.warning(
+                        "Optimization of priors failed (%s); using priors from the previous iteration.",
+                        res.message,
+                    )
 
                 alpha_arr, lbf_model = calAlpha([sigma0], betahats, shat2s, prior_weights)
                 loglik = lbf_model - 0.5 * n * np.log(2 * np.pi) - 0.5 * V_logdet - \
@@ -699,10 +765,14 @@ class MMSuSiESp:
                 Xresi = Xresi + X @ (alpha_arr * post_mean_arr)
 
             logging.info(f"Estimated prior variances: {sigma0_arr.T}")
+            mean_arr2 = alpha_arr2 * mu_arr2
+            posterior_correction = (
+                np.sum(np.sum(alpha_arr2 * mu2_arr2, axis=0) * xtVix)
+                - np.sum((mean_arr2 @ xtVix_mat) * mean_arr2)
+            )
             elbo_arr[iter + 1] = - 0.5 * n * np.log(2 * np.pi) - 0.5 * V_logdet \
-                    - 0.5 * ( (y - Xresi) @ (Vi @ (y - Xresi)) +
-                    np.sum(np.sum(alpha_arr2 * mu2_arr2, axis=0) * xtVix) -
-                    np.sum(np.sum(np.square(alpha_arr2 * mu_arr2), axis=0) * xtVix)) - np.sum(KL_arr)
+                    - 0.5 * ((y - Xresi) @ (Vi @ (y - Xresi)) +
+                    posterior_correction) - np.sum(KL_arr)
             logging.info(f"ELBO: {elbo_arr[iter + 1]}")
             if np.absolute(elbo_arr[iter + 1] - elbo_arr[iter]) < tol:
                 break
@@ -728,7 +798,11 @@ class MMSuSiESp:
                 vX = Vi @ X
                 if scipy.sparse.issparse(vX):
                     vX = vX.toarray()
-                xtVix = np.einsum('ij,ij->j', X, vX)
+                xtVix_mat = X.T @ vX
+                xtVix = np.diag(xtVix_mat)
+                if np.any(~np.isfinite(xtVix)) or np.any(xtVix <= 0):
+                    bad = np.where((~np.isfinite(xtVix)) | (xtVix <= 0))[0]
+                    raise ValueError(f"Non-positive or non-finite X'V^-1X diagonal entries at columns: {bad.tolist()}")
                 shat2s = 1 / xtVix
                 logging.info(f"Updated varcom: {self.varcom}")
         
@@ -975,5 +1049,3 @@ class MMSuSiESp:
                     f.write(" ".join([str(int(i)) for i in vec]) + "\n")
         np.save(out_file + ".mu.npy", res_dct["mu"])
         np.savetxt(out_file + ".lfsr_cs.txt", res_dct["lfsr_cs"])
-
-    
