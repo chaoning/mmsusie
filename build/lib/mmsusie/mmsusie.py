@@ -210,11 +210,11 @@ class MMSuSiE:
         Load the genetic relationship matrix (GRM) and align it with phenotype data.
 
         Args:
-            grm_prefix (str): Prefix path to the GRM files (expects .agrm.id and .agrm.mat_fmt)
+            grm_prefix (str): Prefix path to the GRM files (expects .grm.id and .grm.matrix)
         """
         # Step 1: files
-        grm_id_file = f"{grm_prefix}.agrm.id"
-        grm_mat_file = f"{grm_prefix}.agrm.mat_fmt"
+        grm_id_file = f"{grm_prefix}.grm.id"
+        grm_mat_file = f"{grm_prefix}.grm.matrix"
 
         # Step 2: Read GRM individual IDs
         self.iid_in_grm = pd.read_csv(grm_id_file, sep=r"\s+", header=None, dtype={0: str}).iloc[:, 0].tolist()
@@ -259,7 +259,7 @@ class MMSuSiE:
         """
         
         # Read the GRM group file
-        df_group = pd.read_csv(grm_file + ".agrm.group", sep=r"\s+", header=None,
+        df_group = pd.read_csv(grm_file + ".grm.group", sep=r"\s+", header=None,
                                dtype={0: "Int64", 1: str, 2: "Int64", 3: "Int64"})
         self.iid_in_grm = df_group.iloc[:, 1].tolist()
         logging.info(f"The number of IIDs in the GRM file: {len(self.iid_in_grm)}")
@@ -297,7 +297,7 @@ class MMSuSiE:
 
         # Load GRM file
         df_GRM = pd.read_csv(
-            f"{grm_file}.agrm.ind_fmt",
+            f"{grm_file}.grm.index_triplet",
             sep=r"\s+",
             header=None,
             dtype={0: "Int64", 1: "Int64", 2: "float64"},

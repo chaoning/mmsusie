@@ -6,8 +6,8 @@ requirements.txt
 setup.py
 mmsusie/__init__.py
 mmsusie/gmatrix.py
-mmsusie/mmsusie.py
-mmsusie/mmsusie_main.py
+mmsusie/mmsusie_dense.py
+mmsusie/mmsusie_sp.py
 mmsusie/simu.py
 mmsusie/utils.py
 mmsusie/varcom.py
@@ -16,6 +16,3 @@ mmsusie.egg-info/SOURCES.txt
 mmsusie.egg-info/dependency_links.txt
 mmsusie.egg-info/requires.txt
 mmsusie.egg-info/top_level.txt
-test/test.py
-test/test_em.py
-test/test_mmsusie_main.py

@@ -50,8 +50,8 @@ def compute_all_XtViX(G, E, Vi_sp, n_jobs=32, regularize=0.001):
     - regularize (float): Diagonal regularization coefficient
 
     Returns:
-    - Shat_lst (list of ndarray): List of XtViX matrices (J items, each K x K)
     - Shat_inv_lst (list of ndarray): List of XtViX inverses (J items, each K x K)
+    - Shat_lst (list of ndarray): List of XtViX matrices (J items, each K x K)
     - logdet_S_hat_lst (ndarray): Array of log-determinants of inverses (length J)
     """
     J = G.shape[1]  # Total number of SNPs
@@ -317,7 +317,7 @@ def calAlphaMix(sigma0, prior_cov, betahats_lst, Shat_inv_lst, Shat_lst, logdet_
     # Parallel computation across J signals
     results = Parallel(n_jobs=n_jobs)(
         delayed(process_single_j)(
-            j, sigma0, wt_mix_arr, U_lst, betahats_lst[j],
+            sigma0, wt_mix_arr, U_lst, betahats_lst[j],
             Shat_lst[j], Shat_inv_lst[j], logdet_S_hat_arr[j]
         ) for j in range(J)
     )
