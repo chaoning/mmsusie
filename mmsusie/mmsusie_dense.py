@@ -1,9 +1,7 @@
 '''
-Description: 
+MMSuSiEDense: mixed-model SuSiE fine-mapping with a dense GRM covariance.
+
 Author: Chao Ning
-Date: 2025-03-17 20:33:53
-LastEditTime: 2025-05-19 14:02:43
-LastEditors: Chao Ning
 '''
 
 
@@ -20,9 +18,9 @@ from mmsusie.utils import (
     get_cs_purity,
     filter_prior_components_mmsusie,
 )
+from mmsusie.io import read_genotype_matrix, ld_prune_assoc
 import scipy
 from scipy.optimize import minimize
-from pysnptools.snpreader import Bed
 
 
 def _sigma_neg_loglik_and_grad(varcom, gmat, y, X, Xresi, alpha_arr2, mu_arr2, mu2_arr2):
@@ -160,40 +158,9 @@ class MMSuSiEDense:
         return y
 
     def ld_pure(self, assoc_file, bed_file, ld_r2=0.1, snp="SNP", p="p_gxe", p_cutoff=5e-8):
-        df = pd.read_csv(assoc_file, sep=r"\s+")
-        df = df[df[p] < p_cutoff].copy()
-        df = df.sort_values(by=p)
-        sig_snp_lst = df[snp].tolist()
-        if not sig_snp_lst:
-            raise ValueError("No significant SNPs found with the given p-value cutoff.")
-        logging.info(f"The number of significant SNPs: {len(sig_snp_lst)}")
+        return ld_prune_assoc(assoc_file, bed_file, ld_r2=ld_r2, snp=snp, p=p, p_cutoff=p_cutoff)
 
-        # Read the bim file and get the index of the used SNPs
-        bim_file = bed_file + ".bim"
-        df_bim = pd.read_csv(bim_file, sep=r"\s+", header=None, dtype={0: str, 1: str})
-        missing_snps = set(sig_snp_lst) - set(df_bim[1].tolist())
-        if missing_snps:
-            raise ValueError(f"Missing SNPs in bim file: {missing_snps}")
-        dct = {df_bim.iloc[i, 1]: i for i in range(df_bim.shape[0])}
-        sig_snp_index = [dct[sid] for sid in sig_snp_lst]
 
-        # Read the genotype matrix from the bed file
-        snp_on_disk = Bed(bed_file, count_A1=True)
-        genotype_matrix = snp_on_disk[:, sig_snp_index].read().val
-        genotype_matrix = pd.DataFrame(genotype_matrix, columns=sig_snp_lst)
-        ld_r2_mat = genotype_matrix.corr() ** 2
-        
-        leading_snps = []
-        while not ld_r2_mat.empty:
-            leading_snps.append(ld_r2_mat.columns[0])
-            corr_arr = ld_r2_mat.iloc[0, 1:].to_numpy()
-            ld_r2_mat = ld_r2_mat.iloc[1:, 1:]
-            ld_r2_mat = ld_r2_mat.loc[corr_arr < ld_r2, corr_arr < ld_r2]
-        
-        df_leading = df[df[snp].isin(leading_snps)].copy()
-        return df_leading
-
-    
     def process_y(self, y, X, adjust=True):
         if adjust:
             # Adjust y by X
@@ -208,73 +175,12 @@ class MMSuSiEDense:
         1) `sid_lst`: explicit SNP ids
         2) `start` + `end`: SNP id range in `.bim` order (inclusive)
         """
-        use_sid_lst = sid_lst is not None
-        use_range = start is not None or end is not None
-        if use_sid_lst == use_range:
-            raise ValueError("Use exactly one SNP selector: either `sid_lst` or `start`+`end`.")
-        if use_range and (start is None or end is None):
-            raise ValueError("Both `start` and `end` are required when using range selection.")
-        if iid_lst is None or len(iid_lst) == 0:
-            raise ValueError("`iid_lst` cannot be empty.")
-
-        # Get the index of used individuals in the fam file.
-        fam_file = bedfile + ".fam"
-        df_fam = pd.read_csv(fam_file, sep=r"\s+", header=None, usecols=[1], dtype={1: str})
-        fam_iids = pd.Index(df_fam[1])
-        iid_used_index = fam_iids.get_indexer(iid_lst)
-        if np.any(iid_used_index < 0):
-            missing_iids = [iid_lst[i] for i in np.where(iid_used_index < 0)[0]]
-            raise ValueError(f"Missing iids in fam file: {missing_iids}")
-
-        # Read the bim file and build SNP indexes from either explicit IDs or ID range.
-        bim_file = bedfile + ".bim"
-        df_bim = pd.read_csv(bim_file, sep=r"\s+", header=None, usecols=[1], dtype={1: str})
-        bim_sids = pd.Index(df_bim[1])
-        if use_sid_lst:
-            if len(sid_lst) == 0:
-                raise ValueError("`sid_lst` cannot be empty.")
-            snp_used_index = bim_sids.get_indexer(sid_lst)
-            if np.any(snp_used_index < 0):
-                missing_snps = [sid_lst[i] for i in np.where(snp_used_index < 0)[0]]
-                raise ValueError(f"Missing SNPs in bim file: {missing_snps}")
-        else:
-            start_id = str(start)
-            end_id = str(end)
-            range_index = bim_sids.get_indexer([start_id, end_id])
-            start_idx, end_idx = range_index[0], range_index[1]
-            if start_idx < 0 or end_idx < 0:
-                missing_ids = []
-                if start_idx < 0:
-                    missing_ids.append(start_id)
-                if end_idx < 0:
-                    missing_ids.append(end_id)
-                raise ValueError(f"Missing range SNP IDs in bim file: {missing_ids}")
-            if start_idx > end_idx:
-                raise ValueError(
-                    f"`start` SNP ({start_id}) appears after `end` SNP ({end_id}) in bim order."
-                )
-            snp_used_index = np.arange(start_idx, end_idx + 1, dtype=int)
-        snp_used_ids = bim_sids[snp_used_index].astype(str).tolist()
-
-        # Read the genotype matrix from the bed file.
-        snp_on_disk = Bed(bedfile, count_A1=True)
-        genotype_matrix = snp_on_disk[iid_used_index, snp_used_index].read().val
-        genotype_matrix = pd.DataFrame(genotype_matrix)
-        mean_genotype = genotype_matrix.mean()
-        genotype_matrix.fillna(mean_genotype, inplace=True)
-        genotype_matrix = genotype_matrix.values
-
-        if scale:
-            # Scale the genotype matrix; keep monomorphic SNPs as 0 after centering.
-            mean_genotype = np.mean(genotype_matrix, axis=0).reshape(1, -1)
-            std_genotype = np.std(genotype_matrix, axis=0).reshape(1, -1)
-            std_genotype[std_genotype == 0] = 1.0
-            genotype_matrix = (genotype_matrix - mean_genotype) / std_genotype
-        self.last_snp_ids = snp_used_ids
-
+        genotype_matrix, self.last_snp_ids = read_genotype_matrix(
+            bedfile, iid_lst, sid_lst=sid_lst, scale=scale, start=start, end=end
+        )
         return genotype_matrix
 
-    
+
     def cal_Vi(self, gmat, varcom):
         """
         Construct phenotypic covariance matrix V, compute its inverse and log-determinant.

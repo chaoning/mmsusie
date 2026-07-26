@@ -1,9 +1,7 @@
 '''
-Description: 
+MMSuSiESp: mixed-model SuSiE fine-mapping with a sparse block-diagonal GRM.
+
 Author: Chao Ning
-Date: 2025-03-17 20:33:53
-LastEditTime: 2025-05-19 14:02:43
-LastEditors: Chao Ning
 '''
 
 
@@ -11,14 +9,11 @@ import logging
 import pandas as pd
 import numpy as np
 from mmsusie.utils import neg_logbf, calAlpha, getPIP, in_CS, get_CS, compute_claimed_coverage, get_cs_purity, make_sparse_block
-from mmsusie.utils import neg_logbf_mix, calAlphaMix, optim_sigma0, compute_all_XtViX
-from mmsusie.utils import update_Xresi_parallel, compute_betahats_parallel
-from mmsusie.utils import filter_prior_components, filter_prior_components_mmsusie
-from mmsusie.utils import envi_lfsr
+from mmsusie.utils import filter_prior_components_mmsusie
+from mmsusie.io import read_genotype_matrix, ld_prune_assoc
 import scipy
 from scipy.optimize import minimize
 from scipy import sparse
-from pysnptools.snpreader import Bed
 from collections import defaultdict
 from tqdm import tqdm
 
@@ -278,38 +273,7 @@ class MMSuSiESp:
         return res
 
     def ld_pure(self, assoc_file, bed_file, ld_r2=0.1, snp="SNP", p="p_gxe", p_cutoff=5e-8):
-        df = pd.read_csv(assoc_file, sep=r"\s+")
-        df = df[df[p] < p_cutoff].copy()
-        df = df.sort_values(by=p)
-        sig_snp_lst = df[snp].tolist()
-        if not sig_snp_lst:
-            raise ValueError("No significant SNPs found with the given p-value cutoff.")
-        logging.info(f"The number of significant SNPs: {len(sig_snp_lst)}")
-
-        # Read the bim file and get the index of the used SNPs
-        bim_file = bed_file + ".bim"
-        df_bim = pd.read_csv(bim_file, sep=r"\s+", header=None, dtype={0: str, 1: str})
-        missing_snps = set(sig_snp_lst) - set(df_bim[1].tolist())
-        if missing_snps:
-            raise ValueError(f"Missing SNPs in bim file: {missing_snps}")
-        dct = {df_bim.iloc[i, 1]: i for i in range(df_bim.shape[0])}
-        sig_snp_index = [dct[sid] for sid in sig_snp_lst]
-
-        # Read the genotype matrix from the bed file
-        snp_on_disk = Bed(bed_file, count_A1=True)
-        genotype_matrix = snp_on_disk[:, sig_snp_index].read().val
-        genotype_matrix = pd.DataFrame(genotype_matrix, columns=sig_snp_lst)
-        ld_r2_mat = genotype_matrix.corr() ** 2
-        
-        leading_snps = []
-        while not ld_r2_mat.empty:
-            leading_snps.append(ld_r2_mat.columns[0])
-            corr_arr = ld_r2_mat.iloc[0, 1:].to_numpy()
-            ld_r2_mat = ld_r2_mat.iloc[1:, 1:]
-            ld_r2_mat = ld_r2_mat.loc[corr_arr < ld_r2, corr_arr < ld_r2]
-        
-        df_leading = df[df[snp].isin(leading_snps)].copy()
-        return df_leading
+        return ld_prune_assoc(assoc_file, bed_file, ld_r2=ld_r2, snp=snp, p=p, p_cutoff=p_cutoff)
 
     def read_data(self, data_file, trait, env_int=[], covariate_cols=[], categorical_cols=[], iid_col=0):
         """
@@ -524,58 +488,9 @@ class MMSuSiESp:
         1) `sid_lst`: explicit SNP ids
         2) `start` + `end`: SNP id range in `.bim` order (inclusive)
         """
-        use_sid_lst = sid_lst is not None
-        use_range = start is not None or end is not None
-        if use_sid_lst == use_range:
-            raise ValueError("Use exactly one SNP selector: either `sid_lst` or `start`+`end`.")
-        if use_range and (start is None or end is None):
-            raise ValueError("Both `start` and `end` are required when using range selection.")
-
-        fam_file = bedfile + ".fam"
-        df_fam = pd.read_csv(fam_file, sep=r"\s+", header=None, usecols=[1], dtype={1: str})
-        fam_iids = pd.Index(df_fam[1])
-        iid_used_index = fam_iids.get_indexer(self.iid_used)
-        if np.any(iid_used_index < 0):
-            missing = [self.iid_used[i] for i in np.where(iid_used_index < 0)[0]]
-            raise ValueError(f"Missing iids in fam file: {missing}")
-
-        bim_file = bedfile + ".bim"
-        df_bim = pd.read_csv(bim_file, sep=r"\s+", header=None, usecols=[1], dtype={1: str})
-        bim_sids = pd.Index(df_bim[1])
-        if use_sid_lst:
-            if len(sid_lst) == 0:
-                raise ValueError("`sid_lst` cannot be empty.")
-            snp_used_index = bim_sids.get_indexer(sid_lst)
-            if np.any(snp_used_index < 0):
-                missing = [sid_lst[i] for i in np.where(snp_used_index < 0)[0]]
-                raise ValueError(f"Missing SNPs in bim file: {missing}")
-        else:
-            start_id, end_id = str(start), str(end)
-            range_index = bim_sids.get_indexer([start_id, end_id])
-            start_idx, end_idx = range_index[0], range_index[1]
-            missing_ids = ([start_id] if start_idx < 0 else []) + ([end_id] if end_idx < 0 else [])
-            if missing_ids:
-                raise ValueError(f"Missing range SNP IDs in bim file: {missing_ids}")
-            if start_idx > end_idx:
-                raise ValueError(
-                    f"`start` SNP ({start_id}) appears after `end` SNP ({end_id}) in bim order."
-                )
-            snp_used_index = np.arange(start_idx, end_idx + 1, dtype=int)
-
-        self.last_snp_ids = bim_sids[snp_used_index].astype(str).tolist()
-
-        snp_on_disk = Bed(bedfile, count_A1=True)
-        genotype_matrix = snp_on_disk[iid_used_index, snp_used_index].read().val
-        genotype_matrix = pd.DataFrame(genotype_matrix)
-        genotype_matrix.fillna(genotype_matrix.mean(), inplace=True)
-        genotype_matrix = genotype_matrix.values
-
-        if scale:
-            mean_genotype = np.mean(genotype_matrix, axis=0).reshape(1, -1)
-            std_genotype = np.std(genotype_matrix, axis=0).reshape(1, -1)
-            std_genotype[std_genotype == 0] = 1.0
-            genotype_matrix = (genotype_matrix - mean_genotype) / std_genotype
-
+        genotype_matrix, self.last_snp_ids = read_genotype_matrix(
+            bedfile, self.iid_used, sid_lst=sid_lst, scale=scale, start=start, end=end
+        )
         return genotype_matrix
 
 
@@ -827,181 +742,7 @@ class MMSuSiESp:
         res_dct["elbo"] = elbo_arr
         res_dct["KL"] = KL_arr
         return res_dct
-    
-    def create_mixture_prior(self):
-        nE = self.env_int_arr2.shape[1]
-        U_lst = [np.identity(nE)]
-        mixture_weights_lst = [0.5]
-        U_rank_lst = [np.linalg.matrix_rank(U_lst[0])]
-        U_pinv_lst = [np.linalg.pinv(U_lst[0])]
-        for i in range(nE):
-            cov = np.zeros((nE, nE))
-            cov[i, i] = 1
-            U_lst.append(cov)
-            mixture_weights_lst.append(0.5 / nE)
-            U_rank_lst.append(np.linalg.matrix_rank(cov))
-            U_pinv_lst.append(np.linalg.pinv(cov))
-        prior_cov = {
-            "U": U_lst,
-            "mixture_weights": np.array(mixture_weights_lst),
-            "U_rank": np.array(U_rank_lst),
-            "U_pinv": U_pinv_lst,
-        }
-        return prior_cov
-    
 
-    def mrsusie(self, G, E, y, prior_cov, L=10, prior_weights=None, maxiter=100, tol=1e-3, coverage=0.95,
-                min_abs_corr=0.5, n_jobs=8, estimate_prior_method="optim", prior_tol=1e-09):
-        """
-        Run MR-SuSiE for GxE fine-mapping with a sparse block-diagonal GRM.
-
-        Each effect is modelled as a multivariate (Q-dimensional) GxE vector
-        for a single SNP, using a mixture-of-normals prior on the effect size.
-
-        Args:
-            G (np.ndarray): Genotype matrix (n, J), standardized.
-            E (np.ndarray): Environmental covariate matrix (n, Q), standardized.
-            y (np.ndarray): Phenotype vector (n,), GRM-adjusted and standardized.
-            prior_cov (np.ndarray): Prior covariance matrices (K, Q, Q) for the
-                mixture components.
-            L (int): Maximum number of non-zero effects. Defaults to 10.
-            prior_weights (np.ndarray or None): Prior inclusion probability per SNP
-                (length J). Defaults to uniform 1/J.
-            maxiter (int): Maximum IBSS iterations. Defaults to 100.
-            tol (float): ELBO convergence tolerance. Defaults to 1e-3.
-            coverage (float): Credible set coverage. Defaults to 0.95.
-            min_abs_corr (float): Minimum purity for credible sets. Defaults to 0.5.
-            n_jobs (int): Parallel workers for per-SNP computations. Defaults to 8.
-            estimate_prior_method (str): Method for prior variance optimisation
-                (``"optim"``). Defaults to ``"optim"``.
-            prior_tol (float): Threshold for pruning negligible effects. Defaults to 1e-9.
-
-        Returns:
-            dict: Keys include ``alpha`` (L, J), ``mu`` (L, J, Q), ``pip`` (J,),
-                ``lfsr`` (J, Q), ``lfdr`` (J, Q), ``cs`` (list of index arrays),
-                ``lfsr_cs`` (per-CS lfsr), ``claimed_coverage``.
-        """
-        logging.info("Starting mrsusie...")
-        
-        J = G.shape[1] # number of SNPs
-        # X_lst = [G[:, [j]] * E for j in range(J)] # SNPs * environmental covariates
-        Q = E.shape[1] # number of environmental covariates
-        n = G.shape[0] # number of individuals
-        if J < L:
-            L = J
-        yVar = np.var(y)
-
-        logging.info("Calculating shat2s...")
-        Shat_inv_lst, Shat_lst, logdet_S_hat_arr = compute_all_XtViX(G, E, self.Vi, n_jobs=n_jobs)
-
-        # Initialize susie fit
-        if prior_weights is None:
-            prior_weights = np.full(J, 1.0 / J)  # uniform prior weights for each variable having the non-zero effect
-        
-        # Initialize prior inclusion probabilities (PIPs)
-        alpha_LJ = np.full((L, J), 1.0 / J)
-
-        # Initialize posterior means and second moments as 3D numpy arrays for better performance
-        mu_LJQ = np.zeros((L, J, Q)) # Posterior means
-        S1_LJQQ = np.zeros((L, J, Q, Q)) # Posterior second moments
-        
-        # Initialize list of posterior probability metrics
-        zero_prob_LJQ = np.zeros((L, J, Q))
-        neg_prob_LJQ = np.zeros((L, J, Q))
-        clfsr_LJQ = np.zeros((L, J, Q))
-        lfsr_LJQ = np.zeros((L, J, Q))
-        lfdr_LJQ = np.zeros((L, J, Q))
-
-        # Initialize residual fit, Bayes factors, prior variances, and ELBO
-        Xresi = np.zeros(n)  # fitted values
-        KL_L = np.full(L, np.nan)
-        lbf_L = np.full(L, np.nan) # log Bayes factors
-        sigma0_L = np.full(L, yVar * 0.2) # Prior variance for each effect
-        elbo_arr = np.full(maxiter + 1, np.nan) # ELBO values
-        elbo_arr[0] = -np.inf
-
-        # Empty result dictionary
-        res_dct = {}
-
-        for iter in range(maxiter):
-            logging.info(f"Iteration: {iter + 1}")
-
-            # update each effect once
-            for l in range(L):
-                logging.info(f"    {l + 1}th effect")
-
-                # Remove lth effect from fitted values
-                delta = update_Xresi_parallel(G, E, alpha_LJ[l, :], mu_LJQ[l, :, :], n_jobs=n_jobs)
-                Xresi = Xresi - delta
-
-                # Compute residuals
-                resi = y - Xresi
-
-                # Bayesian single-effect linear regression using residuals as outcomes
-                Viy = self.Vi @ resi
-                betahats_lst = compute_betahats_parallel(G, E, Viy, Shat_lst, n_jobs=n_jobs)
-                
-                # optimize the prior variance
-                sigma0 = sigma0_L[l]
-                res = optim_sigma0(sigma0, prior_cov, betahats_lst, Shat_inv_lst, Shat_lst, logdet_S_hat_arr,
-                                    prior_weights, method=estimate_prior_method, maxiter=1, tol=1e-9)
-                
-                if res[1]:
-                    sigma0 = res[0]
-                    sigma0_L[l] = sigma0
-                else:
-                    logging.warning("Optimization of priors failed; using priors from the previous iteration.")
-                
-                alpha_J, lbf_model, b1_mix_JQ, S1_mix_JQQ, zero_prob_JQ, neg_prob_JQ, clfsr, lfsr, lfdr = \
-                        calAlphaMix(sigma0, prior_cov, betahats_lst, Shat_inv_lst, Shat_lst, logdet_S_hat_arr, prior_weights)
-                loglik = lbf_model - 0.5 * n * np.log(2 * np.pi) - 0.5 * self.V_logdet - \
-                            0.5 * (resi @ (self.Vi @ resi))
-                
-                # update
-                mu_LJQ[l] = b1_mix_JQ
-                S1_LJQQ[l] = S1_mix_JQQ
-                zero_prob_LJQ[l] = zero_prob_JQ
-                neg_prob_LJQ[l] = neg_prob_JQ
-                clfsr_LJQ[l] = clfsr
-                lfsr_LJQ[l] = lfsr
-                lfdr_LJQ[l] = lfdr
-                alpha_LJ[l, :] = alpha_J
-                lbf_L[l] = lbf_model
-                delta = update_Xresi_parallel(G, E, alpha_LJ[l, :], mu_LJQ[l], n_jobs=n_jobs)
-                resi_Xb = resi - delta
-                SER_posterior_e_loglik = - 0.5 * n * np.log(2 * np.pi) - 0.5 * self.V_logdet \
-                            - 0.5 * ( resi_Xb @ (self.Vi @ resi_Xb) + 
-                                      np.sum([np.sum(Shat_inv_lst[j] * (alpha_J[j] * S1_mix_JQQ[j])) for j in range(J)]) )
-                KL_L[l] = -loglik + SER_posterior_e_loglik
-                Xresi = Xresi + delta
-            
-            logging.info(f"Estimated prior variances: {sigma0_L.T}")
-            elbo_arr[iter + 1] = - 0.5 * n * np.log(2 * np.pi) - 0.5 * self.V_logdet \
-                    - 0.5 * ( (y - Xresi) @ (self.Vi @ (y - Xresi)) + 
-                    np.sum([np.sum([np.sum(Shat_inv_lst[j] * (alpha_LJ[l, j] * S1_LJQQ[l, j, :, :])) for j in range(J)]) for l in range(L)]) ) - np.sum(KL_L)
-            logging.info(f"ELBO: {elbo_arr[iter + 1]}")
-            if np.absolute(elbo_arr[iter + 1] - elbo_arr[iter]) < tol: 
-                break
-        alpha_LJ, mu_LJQ, zero_prob_LJQ, neg_prob_LJQ, clfsr_LJQ, lfsr_LJQ = \
-            filter_prior_components(alpha_LJ, mu_LJQ, zero_prob_LJQ, neg_prob_LJQ, clfsr_LJQ, lfsr_LJQ, sigma0_L, prior_tol)
-        res_dct["alpha"] = alpha_LJ
-        res_dct["mu"] = mu_LJQ
-        res_dct["pip"] = getPIP(alpha_LJ)
-        res_dct["lfdr"] = np.min(np.stack(lfdr_LJQ, axis=0), axis=0)
-        res_dct["lfsr"] = np.min(np.stack(lfsr_LJQ, axis=0), axis=0)
-        status = in_CS(alpha_LJ, coverage)
-        cs_lst = get_CS(status)
-        claimed_coverage_arr = compute_claimed_coverage(cs_lst, alpha_LJ)
-        cs_lst, claimed_coverage_arr = get_cs_purity(cs_lst, claimed_coverage_arr, G, min_abs_corr)
-        res_dct["cs"] = cs_lst
-        res_dct["lfsr_cs"] = envi_lfsr(alpha_LJ, clfsr_LJQ, cs_lst)
-        res_dct["claimed_coverage"] = claimed_coverage_arr
-        res_dct["lbf"] = lbf_L
-        res_dct["sigma0"] = sigma0_L
-        res_dct["elbo"] = elbo_arr
-        res_dct["KL"] = KL_L
-        return res_dct
-    
     def out_mmsusie(self, res_dct, out_file):
         pip_df = res_dct["pip"]
         env_names = pip_df.index.tolist()
@@ -1019,33 +760,3 @@ class MMSuSiESp:
         with open(out_file + ".cs.txt", "w") as f:
             for vec in res_dct["cs"]:
                 f.write(" ".join([env_names[int(i)] for i in vec]) + "\n")
-    
-    def out_mrsusie(self, res_dct, out_file):
-        snp_ids = self.last_snp_ids
-        has_ids = snp_ids is not None and len(snp_ids) == res_dct["alpha"].shape[1]
-        if has_ids:
-            pd.DataFrame({"pip": res_dct["pip"]}, index=snp_ids).rename_axis("SNP").to_csv(
-                out_file + ".pip.txt", sep="\t"
-            )
-            pd.DataFrame(res_dct["alpha"], columns=snp_ids).to_csv(
-                out_file + ".alpha.txt", sep="\t", index=False
-            )
-            pd.DataFrame(res_dct["lfsr"], index=snp_ids).to_csv(
-                out_file + ".lfsr.txt", sep="\t"
-            )
-            pd.DataFrame(res_dct["lfdr"], index=snp_ids).to_csv(
-                out_file + ".lfdr.txt", sep="\t"
-            )
-            with open(out_file + ".cs.txt", "w") as f:
-                for vec in res_dct["cs"]:
-                    f.write(" ".join([snp_ids[int(i)] for i in vec]) + "\n")
-        else:
-            np.savetxt(out_file + ".pip.txt", res_dct["pip"])
-            np.savetxt(out_file + ".alpha.txt", res_dct["alpha"])
-            np.savetxt(out_file + ".lfsr.txt", res_dct["lfsr"])
-            np.savetxt(out_file + ".lfdr.txt", res_dct["lfdr"])
-            with open(out_file + ".cs.txt", "w") as f:
-                for vec in res_dct["cs"]:
-                    f.write(" ".join([str(int(i)) for i in vec]) + "\n")
-        np.save(out_file + ".mu.npy", res_dct["mu"])
-        np.savetxt(out_file + ".lfsr_cs.txt", res_dct["lfsr_cs"])

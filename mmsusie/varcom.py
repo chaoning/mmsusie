@@ -1,3 +1,5 @@
+"""Variance-component estimation (weighted EM-AI) and phenotype/GRM alignment."""
+
 import logging
 import os
 
@@ -489,7 +491,6 @@ def prepare_varcom_inputs(
 
 if __name__ == "__main__":
     # get current script directory and set it as working directory
-    import logging
     logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
     script_dir = os.path.dirname(os.path.abspath(__file__))
     os.chdir(script_dir)

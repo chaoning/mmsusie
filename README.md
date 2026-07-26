@@ -12,8 +12,9 @@ It provides an end-to-end workflow for:
 ```
 mmsusie/
 ├── mmsusie_dense.py   # Dense-GRM workflow (MMSuSiEDense)
-├── mmsusie_sp.py      # Sparse block-diagonal GRM + MR-SuSiE workflow (MMSuSiESp)
+├── mmsusie_sp.py      # Sparse block-diagonal GRM workflow (MMSuSiESp)
 ├── utils.py           # Statistical utility functions
+├── io.py              # Genotype / association-file readers (shared)
 ├── varcom.py          # Variance component estimation (WeightEMAI)
 ├── gmatrix.py         # GRM construction (agmat)
 └── simu.py            # Phenotype simulation
@@ -24,7 +25,7 @@ Two classes are exported at the package level:
 | Class | File | GRM type | Key methods |
 |---|---|---|---|
 | `MMSuSiEDense` | `mmsusie_dense.py` | Dense (`cal_Vi`) | `fit`, `out` |
-| `MMSuSiESp` | `mmsusie_sp.py` | Sparse block-diagonal (`cal_spVi`) | `mmsusie`, `mrsusie`, `out_mmsusie` |
+| `MMSuSiESp` | `mmsusie_sp.py` | Sparse block-diagonal (`cal_spVi`) | `mmsusie`, `out_mmsusie` |
 
 ## Requirements
 

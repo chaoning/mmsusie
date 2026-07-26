@@ -1,3 +1,5 @@
+"""Simulate phenotypes (genetic + covariate + categorical effects) from PLINK genotypes."""
+
 import argparse
 import logging
 from pathlib import Path

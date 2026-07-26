@@ -1,4 +1,5 @@
-import argparse
+"""Additive genomic relationship matrix (GRM) construction from PLINK files."""
+
 import logging
 import time
 
