@@ -24,10 +24,16 @@ import scipy
 from scipy.optimize import minimize
 
 
-def _sigma_neg_loglik_and_grad(varcom, gmat, y, X, Xresi, alpha_arr2, mu_arr2, mu2_arr2):
+def _sigma_neg_loglik_and_grad(varcom, gmat, y, X, Xresi, alpha_arr2, mu_arr2, mu2_arr2,
+                               fixed=None):
     """
     Negative log-likelihood and gradient w.r.t. [sigma_g2, sigma_e2].
     V = sigma_g2 * gmat + sigma_e2 * I
+
+    When ``fixed`` (the fixed-effect design F projected out of y/X) is given, the
+    restricted-likelihood term ``0.5*log|F'V^{-1}F|`` and its gradient are added, so
+    the update is REML rather than ML — this removes the downward variance bias that
+    plain ML incurs from the k projected fixed effects.
 
     Returned gradient matches what scipy L-BFGS-B expects (grad of neg-loglik).
     """
@@ -64,6 +70,19 @@ def _sigma_neg_loglik_and_grad(varcom, gmat, y, X, Xresi, alpha_arr2, mu_arr2, m
     grad[1] = (0.5 * np.trace(Vi)
                - 0.5 * (Vir @ Vir)
                - 0.5 * np.sum((X.T @ Vi2X) * correction_mat))
+
+    # REML restricted-likelihood correction for the k projected fixed effects F:
+    #   +0.5*log|F'V^{-1}F|,   d/dσ²_j = -0.5*tr(M^{-1} U'A_j U),  U=V^{-1}F, M=F'V^{-1}F.
+    if fixed is not None:
+        U = Vi @ fixed
+        M = fixed.T @ U
+        sign_m, logdet_m = np.linalg.slogdet(M)
+        if sign_m <= 0:
+            return np.inf, np.full(2, np.inf)
+        Minv = np.linalg.inv(M)
+        neg_ll += 0.5 * logdet_m
+        grad[0] += -0.5 * np.sum(Minv * (U.T @ (gmat @ U)))   # A_0 = gmat
+        grad[1] += -0.5 * np.sum(Minv * (U.T @ U))            # A_1 = I
 
     return neg_ll, grad
 
@@ -335,7 +354,8 @@ class MMSuSiEDense:
                 res_sigma = minimize(
                     _sigma_neg_loglik_and_grad,
                     x0=self.varcom.copy(),
-                    args=(self.gmat, y, X, Xresi, alpha_arr2, mu_arr2, mu2_arr2),
+                    args=(self.gmat, y, X, Xresi, alpha_arr2, mu_arr2, mu2_arr2,
+                          fixed_arr),
                     jac=True,
                     method="L-BFGS-B",
                     bounds=[(1e-10, None), (1e-10, None)],

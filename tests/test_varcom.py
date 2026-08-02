@@ -47,6 +47,29 @@ def test_sigma_gradient_fd_dense(synthetic):
         assert abs(fd - g[i]) < 1e-4, f"dense grad[{i}]: analytic {g[i]}, fd {fd}"
 
 
+def test_sigma_gradient_fd_reml(synthetic):
+    """The REML term (fixed= given) keeps analytic gradients matching finite
+    differences, for both the dense and sparse sigma objectives."""
+    rng = np.random.default_rng(4)
+    n, p, L = synthetic["n"], synthetic["p"], 3
+    alpha, mu, mu2, Xresi = _valid_ser_state(n, p, L, rng)
+    F = np.column_stack([np.ones(n), rng.standard_normal((n, 4))])   # fixed design
+    K, y, G = synthetic["K"], synthetic["y"], synthetic["G"]
+
+    def fd_ok(func, args, v, eps=1e-6):
+        f0, g = func(v, *args)
+        for i in range(len(v)):
+            vp, vm = v.copy(), v.copy()
+            vp[i] += eps; vm[i] -= eps
+            fd = (func(vp, *args)[0] - func(vm, *args)[0]) / (2 * eps)
+            assert abs(fd - g[i]) < 1e-4, f"REML grad[{i}]: analytic {g[i]}, fd {fd}"
+
+    fd_ok(_sigma_neg_loglik_and_grad, (K, y, G, Xresi, alpha, mu, mu2, F), np.array([0.5, 0.7]))
+    E = rng.standard_normal((n, 2))
+    fd_ok(_sigma_neg_loglik_and_grad_sp,
+          ([np.array([]), K], y, G, Xresi, alpha, mu, mu2, E, F), np.array([0.4, 0.3, 0.5]))
+
+
 @pytest.mark.parametrize("nvc", [1, 2])
 def test_sigma_gradient_fd_sparse(synthetic, nvc):
     """Analytic gradient of the sparse sigma objective matches finite differences."""

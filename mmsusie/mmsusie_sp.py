@@ -19,10 +19,15 @@ from tqdm import tqdm
 
 
 def _sigma_neg_loglik_and_grad_sp(varcom, grm_blocks, y, X, Xresi, alpha_arr2, mu_arr2, mu2_arr2,
-                                   env_int_arr2=None):
+                                   env_int_arr2=None, fixed=None):
     """
     Negative log-likelihood and gradient w.r.t. variance components for a
     sparse block-diagonal GRM.  Mirrors the four cases of cal_spVi:
+
+    When ``fixed`` (the fixed-effect design F projected out of y/X) is given, the
+    restricted-likelihood term ``0.5*log|F'V^{-1}F|`` and its gradient are added
+    (accumulated block-wise), making the update REML rather than ML — this removes the
+    downward variance bias that plain ML incurs from the k projected fixed effects.
 
       len==1: V = σ_e² I
       len==2: V = σ_g² GRM + σ_e² I
@@ -46,6 +51,13 @@ def _sigma_neg_loglik_and_grad_sp(varcom, grm_blocks, y, X, Xresi, alpha_arr2, m
     rVir = 0.0
     xtVix = np.zeros((X.shape[1], X.shape[1]))
     grad = np.zeros(nvc)
+
+    # REML: accumulate M = F'V^{-1}F and, per component, T_k = (V^{-1}F)'A_k(V^{-1}F).
+    do_reml = fixed is not None
+    if do_reml:
+        k_fix = fixed.shape[1]
+        M_reml = np.zeros((k_fix, k_fix))
+        T_reml = [np.zeros((k_fix, k_fix)) for _ in range(nvc)]
 
     start = 0
     for i, G_b in enumerate(grm_blocks):
@@ -77,6 +89,13 @@ def _sigma_neg_loglik_and_grad_sp(varcom, grm_blocks, y, X, Xresi, alpha_arr2, m
                 ViAViX_b = (vi_diag ** 2 * a_d)[:, None] * X_b
                 grad[k] -= 0.5 * np.sum((X_b.T @ ViAViX_b) * correction_mat)
 
+            if do_reml:
+                F_b = fixed[start:start + nb, :]
+                U_b = vi_diag[:, None] * F_b               # V^{-1}_b F_b
+                M_reml += F_b.T @ U_b
+                for k, a_d in enumerate(A_diags):
+                    T_reml[k] += U_b.T @ (a_d[:, None] * U_b)
+
         else:                               # dense block
             nb = G_b.shape[0]
 
@@ -104,9 +123,28 @@ def _sigma_neg_loglik_and_grad_sp(varcom, grm_blocks, y, X, Xresi, alpha_arr2, m
                 ViAViX_b = A_k @ viX_b
                 grad[k] -= 0.5 * np.sum((viX_b.T @ ViAViX_b) * correction_mat)
 
+            if do_reml:
+                F_b = fixed[start:start + nb, :]
+                U_b = Vi_b @ F_b                           # V^{-1}_b F_b
+                M_reml += F_b.T @ U_b
+                for k, A_k in enumerate(A_mats):
+                    T_reml[k] += U_b.T @ (A_k @ U_b)
+
         start += nb
 
     neg_ll = 0.5 * V_logdet + 0.5 * (rVir + np.sum(xtVix * correction_mat))
+
+    # REML restricted-likelihood correction for the k projected fixed effects F:
+    #   +0.5*log|F'V^{-1}F|,   d/dσ²_j = -0.5*tr(M^{-1} U'A_j U).
+    if do_reml:
+        sign_m, logdet_m = np.linalg.slogdet(M_reml)
+        if sign_m <= 0:
+            return np.inf, np.full(nvc, np.inf)
+        Minv = np.linalg.inv(M_reml)
+        neg_ll += 0.5 * logdet_m
+        for k in range(nvc):
+            grad[k] += -0.5 * np.sum(Minv * T_reml[k])
+
     return neg_ll, grad
 
 
@@ -656,7 +694,7 @@ class MMSuSiESp:
                     _sigma_neg_loglik_and_grad_sp,
                     x0=self.varcom.copy(),
                     args=(self.grm_blocks, y, X, Xresi, alpha_arr2, mu_arr2, mu2_arr2,
-                          self.env_int_arr2),
+                          self.env_int_arr2, fixed_arr),
                     jac=True,
                     method="L-BFGS-B",
                     bounds=[(1e-10, None)] * nvc,

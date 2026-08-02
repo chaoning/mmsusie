@@ -213,7 +213,7 @@ def make_sparse_block(block_lst):
         scipy.sparse matrix: the block-diagonal assembly (CSR).
     """
     if not block_lst:
-        return sparse.csr_matrix((0, 0), format='csr')
+        return sparse.csr_matrix((0, 0))
 
     head = np.asarray(block_lst[0])
     tail = block_lst[1:]
@@ -227,7 +227,7 @@ def make_sparse_block(block_lst):
     if head.ndim >= 2:                              # no singleton slot: head is a dense block
         return sparse.block_diag(block_lst, format='csr')
     # empty singleton slot: only the dense tail contributes
-    return sparse.block_diag(tail, format='csr') if tail else sparse.csr_matrix((0, 0), format='csr')
+    return sparse.block_diag(tail, format='csr') if tail else sparse.csr_matrix((0, 0))
 
 
 def block_grm_covariances(nvc, grm_block, is_singleton, env_block=None, num_env=None):
