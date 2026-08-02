@@ -264,7 +264,11 @@ class MMSuSiESp:
         if dropped_rows > 0:
             logging.warning(f"Dropped {dropped_rows} rows due to missing values.")
 
-        self.iid_in_data = df.iloc[:, iid_col].tolist()
+        # Index the IID column by NAME, not position: pandas `usecols` returns the
+        # kept columns in FILE order, so `iloc[:, iid_col]` would point at the wrong
+        # column whenever an unselected column precedes the IID.
+        self.iid_column_name = iid_column_name
+        self.iid_in_data = df[iid_column_name].tolist()
         if len(set(self.iid_in_data)) != len(self.iid_in_data):
             raise ValueError("Duplicated IIDs in data file!")
 
@@ -315,11 +319,13 @@ class MMSuSiESp:
         # Update `iid_used` based on the sorted order
         self.iid_used = df_group[1].tolist()
 
-        # Filter `self.df` to retain only rows where the first column is in `iid_used`
-        self.df = self.df.loc[self.df.iloc[:, 0].isin(iid_used_set)]
+        # Filter `self.df` to rows whose IID is in `iid_used` (index by IID column
+        # NAME, since it is not necessarily the first column of the loaded frame).
+        iid_col_name = self.iid_column_name
+        self.df = self.df.loc[self.df[iid_col_name].isin(iid_used_set)]
 
         # Sort `self.df` based on the order of `iid_used`
-        self.df = self.df.assign(sort_order=pd.Categorical(self.df.iloc[:, 0], categories=self.iid_used, ordered=True)).sort_values(by="sort_order").drop(columns=["sort_order"])
+        self.df = self.df.assign(sort_order=pd.Categorical(self.df[iid_col_name], categories=self.iid_used, ordered=True)).sort_values(by="sort_order").drop(columns=["sort_order"])
 
         # Load GRM file
         df_GRM = pd.read_csv(
@@ -489,7 +495,9 @@ class MMSuSiESp:
         for i, grm_block in enumerate(self.grm_blocks):
             num_element = grm_block.shape[0]
             if i == 0 and num_element == 0:             # no singleton individuals
-                continue
+                Vi_lst.append(np.array([]))             # keep the empty singleton slot so
+                continue                                # make_sparse_block treats block 0 as
+                                                        # the (empty) diagonal, not a dense block
             env_block = (self.env_int_arr2[start:start + num_element, :]
                          if nvc >= 3 else None)
             A = block_grm_covariances(nvc, grm_block, i == 0, env_block, num_env)
@@ -604,6 +612,44 @@ class MMSuSiESp:
         res_dct = {}
         for iter in range(maxiter):
             logging.info(f"Iteration: {iter + 1}")
+            # Variance-component (M-step) update from the PREVIOUS sweep's posterior,
+            # applied at the TOP of the sweep so the V used below is exactly the V left
+            # in self.Vi / self.varcom on return: posterior, ELBO and V stay consistent
+            # even when the loop exits at maxiter (no dangling post-sweep update).
+            if estimate_sigma and iter > 0:
+                nvc = len(self.varcom)
+                res_sigma = minimize(
+                    _sigma_neg_loglik_and_grad_sp,
+                    x0=self.varcom.copy(),
+                    args=(self.grm_blocks, y, X, Xresi, alpha_arr2, mu_arr2, mu2_arr2,
+                          self.env_int_arr2),
+                    jac=True,
+                    method="L-BFGS-B",
+                    bounds=[(1e-10, None)] * nvc,
+                )
+                if res_sigma.success:
+                    self.varcom = res_sigma.x
+                else:
+                    logging.warning("Sigma optimization failed; keeping previous variances.")
+                self.cal_spVi(self.varcom)
+                Vi = self.Vi
+                V_logdet = self.V_logdet
+                if fixed_arr is not None:
+                    # Re-project y and genotype with the updated V, and rebuild the
+                    # residual fit so it stays consistent with the re-projected X.
+                    X = self._gls_residualize(X_raw, fixed_arr)
+                    y = self._gls_residualize(y_raw, fixed_arr)
+                    Xresi = X @ np.sum(alpha_arr2 * mu_arr2, axis=0)
+                vX = Vi @ X
+                if scipy.sparse.issparse(vX):
+                    vX = vX.toarray()
+                xtVix_mat = X.T @ vX
+                xtVix = np.diag(xtVix_mat)
+                if np.any(~np.isfinite(xtVix)) or np.any(xtVix <= 0):
+                    bad = np.where((~np.isfinite(xtVix)) | (xtVix <= 0))[0]
+                    raise ValueError(f"Non-positive or non-finite X'V^-1X diagonal entries at columns: {bad.tolist()}")
+                shat2s = 1 / xtVix
+                logging.info(f"Updated varcom: {self.varcom}")
             # update each effect once
             for l in range(L):
                 # Remove lth effect from fitted values
@@ -679,41 +725,6 @@ class MMSuSiESp:
             logging.info(f"ELBO: {elbo_arr[iter + 1]}")
             if np.absolute(elbo_arr[iter + 1] - elbo_arr[iter]) < tol:
                 break
-
-            if estimate_sigma:
-                nvc = len(self.varcom)
-                res_sigma = minimize(
-                    _sigma_neg_loglik_and_grad_sp,
-                    x0=self.varcom.copy(),
-                    args=(self.grm_blocks, y, X, Xresi, alpha_arr2, mu_arr2, mu2_arr2,
-                          self.env_int_arr2),
-                    jac=True,
-                    method="L-BFGS-B",
-                    bounds=[(1e-10, None)] * nvc,
-                )
-                if res_sigma.success:
-                    self.varcom = res_sigma.x
-                else:
-                    logging.warning("Sigma optimization failed; keeping previous variances.")
-                self.cal_spVi(self.varcom)
-                Vi = self.Vi
-                V_logdet = self.V_logdet
-                if fixed_arr is not None:
-                    # Re-project y and genotype with the updated V, and rebuild the
-                    # residual fit so it stays consistent with the re-projected X.
-                    X = self._gls_residualize(X_raw, fixed_arr)
-                    y = self._gls_residualize(y_raw, fixed_arr)
-                    Xresi = X @ np.sum(alpha_arr2 * mu_arr2, axis=0)
-                vX = Vi @ X
-                if scipy.sparse.issparse(vX):
-                    vX = vX.toarray()
-                xtVix_mat = X.T @ vX
-                xtVix = np.diag(xtVix_mat)
-                if np.any(~np.isfinite(xtVix)) or np.any(xtVix <= 0):
-                    bad = np.where((~np.isfinite(xtVix)) | (xtVix <= 0))[0]
-                    raise ValueError(f"Non-positive or non-finite X'V^-1X diagonal entries at columns: {bad.tolist()}")
-                shat2s = 1 / xtVix
-                logging.info(f"Updated varcom: {self.varcom}")
         
         alpha_arr2, mu_arr2 = filter_prior_components_mmsusie(alpha_arr2, mu_arr2, sigma0_arr, prior_tol)
         if self.last_snp_ids is not None and len(self.last_snp_ids) == p:

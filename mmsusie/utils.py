@@ -191,26 +191,35 @@ def get_cs_purity(cs: list[list[int]],
 
 def make_sparse_block(block_lst):
     """
-    Make the sparse GRM from a list of blocks
+    Assemble a sparse block-diagonal matrix from a list of blocks.
+
+    By convention ``block_lst[0]`` is the singleton diagonal (a 1-D vector) and
+    ``block_lst[1:]`` are dense related-block matrices. The head is dispatched by
+    ``ndim`` rather than emptiness, so an empty singleton slot (``np.array([])``)
+    or a stray 2-D head are both handled instead of being mis-read as diagonals.
 
     Args:
-        block_lst (List[np.ndarray]): A list of blocks
+        block_lst (List[np.ndarray]): singleton diagonal vector followed by dense blocks.
 
     Returns:
-        sparse: sparse block diag matrix
+        scipy.sparse matrix: the block-diagonal assembly (CSR).
     """
     if not block_lst:
         return sparse.csr_matrix((0, 0), format='csr')
 
-    if len(block_lst[0]) != 0:
-        part1 = sparse.diags(block_lst[0], format='csr')
-        if len(block_lst) > 1:
-            part2 = sparse.block_diag(block_lst[1:], format='csr')
+    head = np.asarray(block_lst[0])
+    tail = block_lst[1:]
+
+    if head.ndim == 1 and head.size > 0:            # singleton diagonal vector
+        part1 = sparse.diags(head, format='csr')
+        if tail:
+            part2 = sparse.block_diag(tail, format='csr')
             return sparse.block_diag((part1, part2), format='csr')
-        else:
-            return part1
-    else:
-        return sparse.block_diag(block_lst[1:], format='csr') if len(block_lst) > 1 else sparse.csr_matrix((0, 0))
+        return part1
+    if head.ndim >= 2:                              # no singleton slot: head is a dense block
+        return sparse.block_diag(block_lst, format='csr')
+    # empty singleton slot: only the dense tail contributes
+    return sparse.block_diag(tail, format='csr') if tail else sparse.csr_matrix((0, 0), format='csr')
 
 
 def block_grm_covariances(nvc, grm_block, is_singleton, env_block=None, num_env=None):

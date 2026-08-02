@@ -115,7 +115,11 @@ class MMSuSiEDense:
         if dropped_rows > 0:
             logging.warning(f"Dropped {dropped_rows} rows due to missing values.")
 
-        self.iid_in_data = df.iloc[:, iid_col].tolist()
+        # Index the IID column by NAME, not position: pandas `usecols` returns the
+        # kept columns in FILE order, so `iloc[:, iid_col]` would point at the wrong
+        # column whenever an unselected column precedes the IID.
+        self.iid_column_name = iid_column_name
+        self.iid_in_data = df[iid_column_name].tolist()
         if len(set(self.iid_in_data)) != len(self.iid_in_data):
             raise ValueError("Duplicated IIDs in data file!")
 
@@ -293,6 +297,43 @@ class MMSuSiEDense:
         res_dct = {}
         for iter in range(maxiter):
             logging.info(f"Iteration: {iter + 1}")
+            # Variance-component (M-step) update from the PREVIOUS sweep's posterior,
+            # applied at the TOP of the sweep so the V used below is exactly the V left
+            # in self.Vi / self.varcom on return: posterior, ELBO and V stay consistent
+            # even when the loop exits at maxiter (no dangling post-sweep update).
+            if estimate_sigma and iter > 0:
+                res_sigma = minimize(
+                    _sigma_neg_loglik_and_grad,
+                    x0=self.varcom.copy(),
+                    args=(self.gmat, y, X, Xresi, alpha_arr2, mu_arr2, mu2_arr2),
+                    jac=True,
+                    method="L-BFGS-B",
+                    bounds=[(1e-10, None), (1e-10, None)],
+                )
+                if res_sigma.success:
+                    self.varcom = res_sigma.x
+                else:
+                    logging.warning("Sigma optimization failed; keeping previous variances.")
+                sigma_g2, sigma_e2 = self.varcom
+                V = sigma_g2 * self.gmat + sigma_e2 * np.eye(n)
+                _, V_logdet = np.linalg.slogdet(V)
+                Vi = np.linalg.inv(V)
+                self.Vi = Vi
+                self.V_logdet = V_logdet
+                if fixed_arr is not None:
+                    # Re-project y and genotype with the updated V and rebuild the
+                    # residual fit so it stays consistent with the re-projected X.
+                    X = self._gls_residualize(X_raw, fixed_arr)
+                    y = self._gls_residualize(y_raw, fixed_arr)
+                    Xresi = X @ np.sum(alpha_arr2 * mu_arr2, axis=0)
+                vX = Vi @ X
+                xtVix_mat = X.T @ vX
+                xtVix = np.diag(xtVix_mat)
+                if np.any(~np.isfinite(xtVix)) or np.any(xtVix <= 0):
+                    bad = np.where((~np.isfinite(xtVix)) | (xtVix <= 0))[0]
+                    raise ValueError(f"Non-positive or non-finite X'V^-1X diagonal entries at columns: {bad.tolist()}")
+                shat2s = 1 / xtVix
+                logging.info(f"Updated variances: sigma_g2={self.varcom[0]:.6g}, sigma_e2={self.varcom[1]:.6g}")
             # update each effect once
             for l in range(L):
                 # Remove lth effect from fitted values
@@ -352,40 +393,6 @@ class MMSuSiEDense:
             if np.absolute(elbo_arr[iter + 1] - elbo_arr[iter]) < tol:
                 break
 
-            if estimate_sigma:
-                res_sigma = minimize(
-                    _sigma_neg_loglik_and_grad,
-                    x0=self.varcom.copy(),
-                    args=(self.gmat, y, X, Xresi, alpha_arr2, mu_arr2, mu2_arr2),
-                    jac=True,
-                    method="L-BFGS-B",
-                    bounds=[(1e-10, None), (1e-10, None)],
-                )
-                if res_sigma.success:
-                    self.varcom = res_sigma.x
-                else:
-                    logging.warning("Sigma optimization failed; keeping previous variances.")
-                sigma_g2, sigma_e2 = self.varcom
-                V = sigma_g2 * self.gmat + sigma_e2 * np.eye(n)
-                _, V_logdet = np.linalg.slogdet(V)
-                Vi = np.linalg.inv(V)
-                self.Vi = Vi
-                self.V_logdet = V_logdet
-                if fixed_arr is not None:
-                    # Re-project y and genotype with the updated V and rebuild the
-                    # residual fit so it stays consistent with the re-projected X.
-                    X = self._gls_residualize(X_raw, fixed_arr)
-                    y = self._gls_residualize(y_raw, fixed_arr)
-                    Xresi = X @ np.sum(alpha_arr2 * mu_arr2, axis=0)
-                vX = Vi @ X
-                xtVix_mat = X.T @ vX
-                xtVix = np.diag(xtVix_mat)
-                if np.any(~np.isfinite(xtVix)) or np.any(xtVix <= 0):
-                    bad = np.where((~np.isfinite(xtVix)) | (xtVix <= 0))[0]
-                    raise ValueError(f"Non-positive or non-finite X'V^-1X diagonal entries at columns: {bad.tolist()}")
-                shat2s = 1 / xtVix
-                logging.info(f"Updated variances: sigma_g2={self.varcom[0]:.6g}, sigma_e2={self.varcom[1]:.6g}")
-        
         alpha_arr2, mu_arr2 = filter_prior_components_mmsusie(alpha_arr2, mu_arr2, sigma0_arr, prior_tol)
         res_dct["alpha"] = alpha_arr2
         res_dct["mu"] = mu_arr2
