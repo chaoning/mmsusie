@@ -7,7 +7,8 @@ It provides an end-to-end workflow for:
 - estimating variance components by weighted EM-AI REML — dense (`WeightEMAI`) or
   sparse block-diagonal with 1-4 components for GxE (`WeightEMAISp`),
 - running MMSuSiE fine-mapping with GRM-adjusted (GLS) covariance and full
-  Frisch–Waugh–Lovell covariate adjustment.
+  Frisch–Waugh–Lovell covariate adjustment, returning per-SNP posterior inclusion
+  probabilities (PIP) and purity-filtered credible sets.
 
 ## Project Layout
 
@@ -153,6 +154,9 @@ fastgxe --process-grm --group --grm ./output/test --cut-value 0.05
 fastgxe --process-grm --reformat --sparse --grm ./output/test --out-fmt 1 --out ./output/test
 ```
 
+> On some clusters `fastgxe` (Intel OpenMP) aborts with a `KMP_AFFINITY` assertion.
+> If so, prefix the commands with `KMP_AFFINITY=disabled`.
+
 These commands produce the sparse GRM files `MMSuSiESp` reads:
 
 | File | Used by |
@@ -162,15 +166,15 @@ These commands produce the sparse GRM files `MMSuSiESp` reads:
 
 `fastgxe` is only needed to build the sparse GRM (steps 1-3). **Variance components
 are estimated natively with `WeightEMAISp`** (weighted EM-AI REML on the sparse
-block-diagonal GRM, 1-4 components incl. GxE) — no `fastgxe --test-main` needed. It
-scales linearly on a sparse GRM (~2 s at n=50k); for very large biobank pipelines
-the compiled `fastgxe` REML is faster in absolute terms.
+block-diagonal GRM, 1-4 components incl. GxE) — no `fastgxe --test-main` needed. On
+the example data it reproduces `fastgxe`'s REML to ~4 decimals; because it inverts the
+GRM block by block, its cost tracks the relatedness structure rather than `n` itself.
 
 ```python
 import os, logging
 logging.basicConfig(level=logging.INFO)
 
-from mmsusie import MMSuSiESp
+from mmsusie import MMSuSiESp, WeightEMAISp
 
 os.chdir("example")
 os.makedirs("output", exist_ok=True)
@@ -183,7 +187,6 @@ ms.read_sp_grm("output/test")
 # 2) Estimate variance components on the sparse GRM (native REML) -> build sparse V^{-1}
 #    Pass the raw phenotype + fixed-effect design (intercept + covariates). For GxE
 #    variance components use n_varcom=3 or 4 and pass env_int_arr2=ms.get_env_int().
-from mmsusie import WeightEMAISp
 varcom = WeightEMAISp().fit(ms.get_y(adjust=False), ms.get_fixed(), ms.grm_blocks, n_varcom=2)
 ms.cal_spVi(varcom)  # varcom = [sigma_g2, sigma_e2]
 
@@ -219,12 +222,12 @@ not carried as columns in the SuSiE model:
 
 - **Variance components** are estimated by REML, which projects the fixed effects
   out via `P = V⁻¹ − V⁻¹X(X'V⁻¹X)⁻¹X'V⁻¹` (the `log|X'V⁻¹X|` term).
-- **Fine-mapping** residualizes the phenotype against the fixed effects
-  (`get_y(adjust=True)` / `process_y`). By default only the phenotype is adjusted.
-- Passing `fixed=` to `mmsusie` / `fit` additionally projects the covariates out of
-  the **genotype** — full Frisch–Waugh–Lovell — refreshed whenever `estimate_sigma`
-  updates V. Build the matrix with `MMSuSiESp.get_fixed()`, or (dense) pass the same
-  `xmat` used for variance-component estimation.
+- **Fine-mapping** removes them by passing `fixed=` to `fit` (as in both examples):
+  the covariates are projected out of **both** `y` and the genotype in the V⁻¹ metric
+  — full Frisch–Waugh–Lovell — and re-projected whenever `estimate_sigma` updates V.
+  Build the matrix with `MMSuSiESp.get_fixed()`, or (dense) pass the same `xmat` used
+  for variance-component estimation. Omit `fixed=` to adjust only `y`
+  (`get_y(adjust=True)` / `process_y`), a lighter approximation.
 
 Full FWL matters when covariates correlate with the region's genotypes (ancestry
 PCs, a PRS, other SNPs) or in small samples; the correction on each variant scales
