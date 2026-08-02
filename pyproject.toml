@@ -2,3 +2,13 @@
 requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+markers = [
+    "slow: tests that read the example PLINK data or build its GRM",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+]
+

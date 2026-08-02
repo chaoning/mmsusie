@@ -264,6 +264,19 @@ For SNP selection in `get_genotype`, use exactly one mode:
 - `.mu.txt`: posterior mean effects
 - `.cs.txt`: credible sets
 
+## Tests
+
+The `tests/` suite (pytest) covers dense/sparse equivalence, variance-component
+estimation (finite-difference gradient checks, sparse≡dense REML), and a regression
+test per reviewed bug fix. Most tests run on small synthetic data; a few integration
+tests (marked `slow`) use the bundled `example/` genotypes.
+
+```bash
+pip install -r requirements-dev.txt
+pytest                 # full suite
+pytest -m "not slow"   # fast, synthetic-only (no example data / GRM build)
+```
+
 ## License
 
 GPL-3.0. See `LICENSE.md`.
