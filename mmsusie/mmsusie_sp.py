@@ -552,7 +552,9 @@ class MMSuSiESp:
             min_abs_corr (float): Minimum absolute correlation for CS purity filtering.
             prior_tol (float): Prune effects whose prior variance falls below this.
             estimate_sigma (bool): Jointly re-estimate the variance components each
-                sweep (requires :meth:`cal_spVi` to have been called).
+                sweep via a profile-ML / mixed-model (generalized-EM) update — this is
+                NOT REML (the standalone :class:`WeightEMAISp` is REML). Requires
+                :meth:`cal_spVi` to have been called.
             fixed (np.ndarray or None): Fixed-effect design (e.g. :meth:`get_fixed`).
                 When given, both ``y`` and the genotype are projected onto the
                 covariate orthogonal complement in the ``V^{-1}`` metric — full

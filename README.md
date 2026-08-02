@@ -234,6 +234,15 @@ PCs, a PRS, other SNPs) or in small samples; the correction on each variant scal
 with its R² to the covariates. Otherwise the default (adjust `y` only) is a close
 approximation.
 
+**Two variance-component modes (REML vs profile-ML).** The standalone `WeightEMAI` /
+`WeightEMAISp` estimators are **REML** — they carry the restricted-likelihood
+`log|X'V⁻¹X|` term. The in-loop `fit(estimate_sigma=True)` refit is instead a
+**profile-ML / mixed-model (generalized-EM) update**: each IBSS sweep maximizes the
+profile likelihood at the current SuSiE fit under the current projection, then
+re-projects once V changes at the next sweep. The two agree closely but are not
+identical — use the REML estimator up front to obtain the variance components, and
+`estimate_sigma=True` to let them drift jointly with the fine-mapping.
+
 ## Input Data Notes
 
 - PLINK genotype files must share one prefix: `<prefix>.bed/.bim/.fam`.

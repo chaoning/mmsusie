@@ -137,10 +137,11 @@ class MMSuSiEDense:
         Returns:
             np.ndarray: Environmental covariate matrix (n, K).
         """
-        self.env_int_arr2 = self.df.loc[:, self.env_int].values
+        self.env_int_arr2 = self.df.loc[:, self.env_int].values.astype(float)
         if scale:
             mean_arr = np.mean(self.env_int_arr2, axis=0).reshape(1, -1)
             std_arr = np.std(self.env_int_arr2, axis=0).reshape(1, -1)
+            std_arr[std_arr == 0] = 1.0   # constant column -> leave it centred, don't divide by 0
             self.env_int_arr2 = (self.env_int_arr2 - mean_arr) / std_arr
         return self.env_int_arr2
 
@@ -155,11 +156,17 @@ class MMSuSiEDense:
         Returns:
             np.ndarray: Trait values (n,).
         """
-        y = self.df.loc[:, self.trait].values
-        if adjust:
-            y = y - self.env_int_arr2 @ np.linalg.inv(self.env_int_arr2.T @ self.env_int_arr2) @ (self.env_int_arr2.T @ y)
+        y = self.df.loc[:, self.trait].values.astype(float)
+        if adjust and self.env_int:
+            # Lazily build the env matrix if get_env_int() was not called first; use
+            # pinv so a rank-deficient / constant env design does not blow up.
+            if self.env_int_arr2 is None:
+                self.get_env_int()
+            E = self.env_int_arr2
+            y = y - E @ np.linalg.pinv(E.T @ E) @ (E.T @ y)
         if scale:
-            y = (y - np.mean(y)) / np.std(y)
+            sd = np.std(y)
+            y = (y - np.mean(y)) / (sd if sd > 0 else 1.0)   # constant phenotype -> don't divide by 0
         return y
 
     def ld_pure(self, assoc_file, bed_file, ld_r2=0.1, snp="SNP", p="p_gxe", p_cutoff=5e-8):
@@ -249,6 +256,10 @@ class MMSuSiEDense:
         orthogonal complement in the V^{-1} metric (full Frisch–Waugh–Lovell),
         refreshed whenever ``estimate_sigma`` updates V. When None (default), only
         ``y`` is treated as pre-adjusted (backward-compatible; use ``process_y``).
+
+        ``estimate_sigma=True`` re-estimates the variance components each sweep via a
+        profile-ML / mixed-model (generalized-EM) update — NOT REML (the standalone
+        :class:`WeightEMAI` is REML).
         """
         # Normalize/validate shapes up front so a (n, 1) phenotype or a mismatched
         # design fails with a clear message instead of a cryptic broadcast error.

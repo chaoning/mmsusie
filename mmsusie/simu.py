@@ -212,6 +212,16 @@ def simulate_finemap_example(bed_file, out_file, causal_snps, causal_effects, re
     r0, r1 = sid_to_idx[region[0]], sid_to_idx[region[1]]
     region_idx = np.arange(min(r0, r1), max(r0, r1) + 1)
     causal_idx = [sid_to_idx[c] for c in causal_snps]
+    # Every causal must lie inside the region: otherwise the "region contains only the
+    # planted signals" contract breaks and the causal could be resampled into the
+    # (outside-region) polygenic background.
+    region_set = set(region_idx.tolist())
+    off_region = [s for c, s in zip(causal_idx, causal_snps) if c not in region_set]
+    if off_region:
+        raise ValueError(
+            f"causal SNP(s) lie outside the region {region[0]}..{region[1]}: {off_region}"
+        )
+    # Background is drawn from OUTSIDE the region, so it never overlaps the causals.
     outside = np.setdiff1d(np.arange(bim.shape[0]), region_idx)
     bg_idx = np.sort(rng.choice(outside, min(n_bg_causal, outside.size), replace=False))
 
