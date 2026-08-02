@@ -17,6 +17,7 @@ from mmsusie.utils import (
     compute_claimed_coverage,
     get_cs_purity,
     filter_prior_components_mmsusie,
+    gls_residualize,
 )
 from mmsusie.io import read_genotype_matrix, ld_prune_assoc
 import scipy
@@ -162,8 +163,20 @@ class MMSuSiEDense:
 
 
     def process_y(self, y, X, adjust=True):
+        """
+        GLS-residualize the phenotype against the fixed effects ``X``:
+        ``y − X(X'V⁻¹X)⁻¹X'V⁻¹y`` (projection in the V^{-1} metric). Requires
+        :meth:`cal_Vi` to have set ``self.Vi``.
+
+        Args:
+            y (np.ndarray): Phenotype (n,) or (n, 1).
+            X (np.ndarray): Fixed-effect design (n, k) — intercept + covariates.
+            adjust (bool): If False, just flatten and return ``y`` unchanged.
+
+        Returns:
+            np.ndarray: Covariate-adjusted phenotype (n,).
+        """
         if adjust:
-            # Adjust y by X
             y = y - X @ (np.linalg.pinv(X.T @ self.Vi @ X) @ (X.T @ (self.Vi @ y)))
         return y.flatten()
     
@@ -213,8 +226,23 @@ class MMSuSiEDense:
         self.gmat = gmat
         self.varcom = np.array([sigma_g2, sigma_e2], dtype=float)
 
+    def _gls_residualize(self, mat, fixed):
+        """Project ``fixed`` out of ``mat`` in the current V^{-1} metric."""
+        return gls_residualize(mat, fixed, self.Vi)
+
     def fit(self, X, y, L=10, maxiter=100, tol=1e-3, coverage=0.95,
-                min_abs_corr=0.5, prior_tol=1e-09, pip_index=None, estimate_sigma=True):
+                min_abs_corr=0.5, prior_tol=1e-09, pip_index=None, estimate_sigma=True,
+                fixed=None):
+        """
+        Run MMSuSiE fine-mapping on genotype ``X`` and phenotype ``y``.
+
+        ``fixed`` (optional): the fixed-effect design (the ``xmat`` used for
+        variance-component estimation, e.g. ``prepare_varcom_inputs(...)["xmat"]``).
+        When provided, both ``y`` and the genotype are projected onto the covariate
+        orthogonal complement in the V^{-1} metric (full Frisch–Waugh–Lovell),
+        refreshed whenever ``estimate_sigma`` updates V. When None (default), only
+        ``y`` is treated as pre-adjusted (backward-compatible; use ``process_y``).
+        """
         p = X.shape[1]
         n = X.shape[0]
         if p < L:
@@ -227,6 +255,15 @@ class MMSuSiEDense:
         # Local copies updated each time estimate_sigma re-estimates V.
         Vi = self.Vi
         V_logdet = self.V_logdet
+
+        # Full Frisch–Waugh–Lovell: project fixed effects out of BOTH y and the
+        # genotype in the V^{-1} metric (keep raw copies to refresh on V updates).
+        fixed_arr = None
+        if fixed is not None:
+            fixed_arr = np.asarray(fixed, dtype=float)
+            X_raw, y_raw = X, y
+            X = self._gls_residualize(X, fixed_arr)
+            y = self._gls_residualize(y, fixed_arr)
 
         logging.info("Starting mmsusie...")
         logging.info("Calculating shat2s...")
@@ -334,6 +371,12 @@ class MMSuSiEDense:
                 Vi = np.linalg.inv(V)
                 self.Vi = Vi
                 self.V_logdet = V_logdet
+                if fixed_arr is not None:
+                    # Re-project y and genotype with the updated V and rebuild the
+                    # residual fit so it stays consistent with the re-projected X.
+                    X = self._gls_residualize(X_raw, fixed_arr)
+                    y = self._gls_residualize(y_raw, fixed_arr)
+                    Xresi = X @ np.sum(alpha_arr2 * mu_arr2, axis=0)
                 vX = Vi @ X
                 xtVix_mat = X.T @ vX
                 xtVix = np.diag(xtVix_mat)
@@ -372,6 +415,11 @@ class MMSuSiEDense:
 
     
     def out(self, res_dct, out_file):
+        """
+        Write the fine-mapping result tables to ``<out_file>.{pip,alpha,mu,cs}.txt``.
+        Uses SNP ids from ``res_dct["snp_ids"]`` as column/index labels when their
+        count matches the number of variants, otherwise falls back to numeric ids.
+        """
         alpha = res_dct["alpha"]
         mu = res_dct["mu"]
         p = alpha.shape[1]

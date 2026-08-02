@@ -4,8 +4,10 @@ MMSuSiE is a Python package for mixed-model SuSiE fine-mapping.
 It provides an end-to-end workflow for:
 
 - building additive genetic relationship matrices (GRM) from PLINK files,
-- estimating variance components with weighted EM-AI,
-- running MMSuSiE fine-mapping with GRM-adjusted covariance.
+- estimating variance components by weighted EM-AI REML — dense (`WeightEMAI`) or
+  sparse block-diagonal with 1-4 components for GxE (`WeightEMAISp`),
+- running MMSuSiE fine-mapping with GRM-adjusted (GLS) covariance and full
+  Frisch–Waugh–Lovell covariate adjustment.
 
 ## Project Layout
 
@@ -15,7 +17,7 @@ mmsusie/
 ├── mmsusie_sp.py      # Sparse block-diagonal GRM workflow (MMSuSiESp)
 ├── utils.py           # Statistical utility functions
 ├── io.py              # Genotype / association-file readers (shared)
-├── varcom.py          # Variance component estimation (WeightEMAI)
+├── varcom.py          # Variance component estimation (WeightEMAI dense / WeightEMAISp sparse)
 ├── gmatrix.py         # GRM construction (agmat)
 └── simu.py            # Phenotype simulation
 ```
@@ -24,8 +26,11 @@ Two classes are exported at the package level:
 
 | Class | File | GRM type | Key methods |
 |---|---|---|---|
-| `MMSuSiEDense` | `mmsusie_dense.py` | Dense (`cal_Vi`) | `fit`, `out` |
-| `MMSuSiESp` | `mmsusie_sp.py` | Sparse block-diagonal (`cal_spVi`) | `mmsusie`, `out_mmsusie` |
+| `MMSuSiEDense` | `mmsusie_dense.py` | Dense (`cal_Vi`) | `fit`, `process_y`, `out` |
+| `MMSuSiESp` | `mmsusie_sp.py` | Sparse block-diagonal (`cal_spVi`) | `mmsusie`, `get_y`, `get_fixed`, `out_mmsusie` |
+
+Also exported: `agmat` (GRM), `WeightEMAI` / `WeightEMAISp` (variance components),
+`prepare_varcom_inputs`.
 
 ## Requirements
 
@@ -35,7 +40,6 @@ Two classes are exported at the package level:
 - scipy >= 1.7
 - pysnptools >= 0.5
 - tqdm >= 4.60
-- joblib >= 1.2
 
 ## Installation
 
@@ -76,24 +80,27 @@ var_com = WeightEMAI().fit(
     gmat_lst=[inputs["gmat"]],
 )
 
-# 4) Run MMSuSiEDense
+# 4) Run MMSuSiEDense with full FWL covariate adjustment
 ms = MMSuSiEDense()
 ms.cal_Vi(inputs["gmat"], var_com)
-y_adj = ms.process_y(inputs["y"], inputs["xmat"], adjust=True)
 G = ms.get_genotype(
     "test",
     iid_lst=inputs["used_iids"],
     start="rs11132426",
     end="rs7694910",
 )
-# Pass estimate_sigma=True to jointly re-estimate variance components
-# during IBSS iterations (requires cal_Vi() to have been called first).
-result = ms.fit(G, y_adj, L=10, estimate_sigma=True)
+# fixed=inputs["xmat"] gives full Frisch–Waugh–Lovell: the covariates are projected
+# out of BOTH y and the genotype in the V^{-1} metric (no separate process_y needed).
+# estimate_sigma=True jointly re-estimates the variance components and refreshes the
+# projection each IBSS sweep.
+result = ms.fit(G, inputs["y"].flatten(), L=10, estimate_sigma=True, fixed=inputs["xmat"])
 
-# 5) Export y_adj and G to text (for comparison with susieR)
+# 5) Export the FWL-projected y and G (for an apples-to-apples susieR comparison)
 import pandas as pd
-df_out = pd.DataFrame({"IID": inputs["used_iids"], "y_adj": y_adj.flatten()})
-df_G = pd.DataFrame(G, columns=result["snp_ids"])
+y_adj = ms._gls_residualize(inputs["y"].flatten(), inputs["xmat"])
+G_adj = ms._gls_residualize(G, inputs["xmat"])
+df_out = pd.DataFrame({"IID": inputs["used_iids"], "y_adj": y_adj})
+df_G = pd.DataFrame(G_adj, columns=result["snp_ids"])
 pd.concat([df_out, df_G], axis=1).to_csv("output/test_mmsusie_data.txt", sep="\t", index=False)
 
 # 6) Export result tables
@@ -125,8 +132,8 @@ print(cs_named)
 
 ### Sparse Block-diagonal GRM (`MMSuSiESp`)
 
-Before running Python, use `fastgxe` ([download](https://github.com/chaoning/fastGxE)) to build the sparse GRM and estimate
-variance components (run from the `example/` directory):
+Before running Python, use `fastgxe` ([download](https://github.com/chaoning/fastGxE)) to build the sparse GRM
+(run from the `example/` directory):
 
 ```bash
 # 1) Build GRM from PLINK files
@@ -139,26 +146,23 @@ fastgxe --process-grm --group --grm ./output/test --cut-value 0.05
 #    --out must share the same prefix as --grm so that read_sp_grm()
 #    can find both .grm.group and .grm.index_triplet under one prefix.
 fastgxe --process-grm --reformat --sparse --grm ./output/test --out-fmt 1 --out ./output/test
-
-# 4) Estimate variance components (sigma_g2, sigma_e2)
-#    Adding --bfile also runs a full GWAS; omit it if only variance
-#    components are needed.
-fastgxe --test-main --grm ./output/test --data data.txt \
-        --trait pheno --covar cov1 cov2 cov3 --out ./output/test_main
 ```
 
-These commands produce the files `MMSuSiESp` reads:
+These commands produce the sparse GRM files `MMSuSiESp` reads:
 
 | File | Used by |
 |---|---|
-| `output/test.grm.id` | `read_sp_grm` |
-| `output/test.grm.group` | `read_sp_grm` |
-| `output/test.grm.index_triplet` | `read_sp_grm` |
-| `output/test_main.var` | `cal_spVi` (variance components) |
+| `output/test.grm.group` | `read_sp_grm` (sample IDs + relatedness groups) |
+| `output/test.grm.index_triplet` | `read_sp_grm` (GRM values) |
+
+`fastgxe` is only needed to build the sparse GRM (steps 1-3). **Variance components
+are estimated natively with `WeightEMAISp`** (weighted EM-AI REML on the sparse
+block-diagonal GRM, 1-4 components incl. GxE) — no `fastgxe --test-main` needed. It
+scales linearly on a sparse GRM (~2 s at n=50k); for very large biobank pipelines
+the compiled `fastgxe` REML is faster in absolute terms.
 
 ```python
 import os, logging
-import numpy as np
 logging.basicConfig(level=logging.INFO)
 
 from mmsusie import MMSuSiESp
@@ -171,34 +175,58 @@ ms = MMSuSiESp()
 ms.read_data("data.txt", trait="pheno", covariate_cols=["cov1", "cov2", "cov3"])
 ms.read_sp_grm("output/test")
 
-# 2) Load variance components and build sparse V^{-1}
-varcom = np.loadtxt("output/test_main.var")  # [sigma_g2, sigma_e2]
-ms.cal_spVi(varcom)
+# 2) Estimate variance components on the sparse GRM (native REML) -> build sparse V^{-1}
+#    Pass the raw phenotype + fixed-effect design (intercept + covariates). For GxE
+#    variance components use n_varcom=3 or 4 and pass env_int_arr2=ms.get_env_int().
+from mmsusie import WeightEMAISp
+varcom = WeightEMAISp().fit(ms.get_y(adjust=False), ms.get_fixed(), ms.grm_blocks, n_varcom=2)
+ms.cal_spVi(varcom)  # varcom = [sigma_g2, sigma_e2]
 
-# 3) Prepare y using GLS (regress out covariates with V^{-1} weighting)
-y = ms.get_y(adjust=True)
+# 3) Raw phenotype (fixed= below projects it; no separate GLS pre-adjustment needed)
+y = ms.get_y(adjust=False)
 
 # 4) Load genotype for region of interest
 G = ms.get_genotype("test", start="rs11132426", end="rs7694910")
 
-# 5) Run MMSuSiE
-# Pass estimate_sigma=True to jointly re-estimate variance components
-# during IBSS iterations (recommended when varcom may be imprecise).
-result = ms.mmsusie(G, y, L=10, estimate_sigma=True)
+# 5) Run MMSuSiE with full FWL covariate adjustment
+# fixed=ms.get_fixed() projects the covariates out of BOTH y and the genotype in the
+# V^{-1} metric (no separate get_y adjustment needed). estimate_sigma=True jointly
+# re-estimates the variance components and refreshes the projection each IBSS sweep.
+# Omit fixed= (default) to adjust only y (backward-compatible).
+result = ms.mmsusie(G, y, L=10, estimate_sigma=True, fixed=ms.get_fixed())
 
 # 6) Export result tables
 ms.out_mmsusie(result, out_file="output/test_mmsusie_sp")
 ```
+
+## Covariate (fixed-effect) handling
+
+Fixed effects — intercept, numeric covariates, one-hot categoricals, and (for GxE)
+environment main effects — are removed by projection in the V^{-1} (GLS) metric,
+not carried as columns in the SuSiE model:
+
+- **Variance components** are estimated by REML, which projects the fixed effects
+  out via `P = V⁻¹ − V⁻¹X(X'V⁻¹X)⁻¹X'V⁻¹` (the `log|X'V⁻¹X|` term).
+- **Fine-mapping** residualizes the phenotype against the fixed effects
+  (`get_y(adjust=True)` / `process_y`). By default only the phenotype is adjusted.
+- Passing `fixed=` to `mmsusie` / `fit` additionally projects the covariates out of
+  the **genotype** — full Frisch–Waugh–Lovell — refreshed whenever `estimate_sigma`
+  updates V. Build the matrix with `MMSuSiESp.get_fixed()`, or (dense) pass the same
+  `xmat` used for variance-component estimation.
+
+Full FWL matters when covariates correlate with the region's genotypes (ancestry
+PCs, a PRS, other SNPs) or in small samples; the correction on each variant scales
+with its R² to the covariates. Otherwise the default (adjust `y` only) is a close
+approximation.
 
 ## Input Data Notes
 
 - PLINK genotype files must share one prefix: `<prefix>.bed/.bim/.fam`.
 - Phenotype table must include one row per individual and an IID column (default: first column).
 - **Dense GRM** (`MMSuSiEDense`): built with `agmat()`, produces `.grm.id` and `.grm.matrix`.
-- **Sparse GRM** (`MMSuSiESp`): built with `fastgxe`, requires three files under the same prefix:
-  - `.grm.id` — sample IDs (`fastgxe --make-grm`)
-  - `.grm.group` — relatedness groups (`fastgxe --process-grm --group`)
-  - `.grm.index_triplet` — lower-triangle triplets (`fastgxe --process-grm --reformat --sparse`)
+- **Sparse GRM** (`MMSuSiESp`): built with `fastgxe`; `read_sp_grm` reads two files under the same prefix:
+  - `.grm.group` — sample IDs + relatedness groups (`fastgxe --process-grm --group`)
+  - `.grm.index_triplet` — lower-triangle GRM triplets (`fastgxe --process-grm --reformat --sparse`)
 
 For SNP selection in `get_genotype`, use exactly one mode:
 

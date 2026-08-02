@@ -9,7 +9,7 @@ import logging
 import pandas as pd
 import numpy as np
 from mmsusie.utils import neg_logbf, calAlpha, getPIP, in_CS, get_CS, compute_claimed_coverage, get_cs_purity, make_sparse_block
-from mmsusie.utils import filter_prior_components_mmsusie
+from mmsusie.utils import filter_prior_components_mmsusie, gls_residualize, block_grm_covariances
 from mmsusie.io import read_genotype_matrix, ld_prune_assoc
 import scipy
 from scipy.optimize import minimize
@@ -40,9 +40,7 @@ def _sigma_neg_loglik_and_grad_sp(varcom, grm_blocks, y, X, Xresi, alpha_arr2, m
     mean_arr2 = alpha_arr2 * mu_arr2
     correction_mat = np.diag(np.sum(alpha_arr2 * mu2_arr2, axis=0)) - mean_arr2.T @ mean_arr2
 
-    if nvc >= 3:
-        num_envi_int = env_int_arr2.shape[1]
-        nxe_arr = np.sum(env_int_arr2 ** 2, axis=1) / num_envi_int  # (n,)
+    num_envi_int = env_int_arr2.shape[1] if nvc >= 3 else None
 
     V_logdet = 0.0
     rVir = 0.0
@@ -56,22 +54,9 @@ def _sigma_neg_loglik_and_grad_sp(varcom, grm_blocks, y, X, Xresi, alpha_arr2, m
             if nb == 0:
                 continue
 
-            if nvc >= 3:
-                nxe_b  = nxe_arr[start:start + nb]
-                gxe_b  = nxe_b * G_b        # diag of GRM ⊙ EE'/K
-
-            if nvc == 1:
-                v_diag = np.full(nb, varcom[0])
-                A_diags = [np.ones(nb)]
-            elif nvc == 2:
-                v_diag  = G_b * varcom[0] + varcom[1]
-                A_diags = [G_b, np.ones(nb)]
-            elif nvc == 3:
-                v_diag  = G_b * varcom[0] + gxe_b * varcom[1] + varcom[2]
-                A_diags = [G_b, gxe_b, np.ones(nb)]
-            else:
-                v_diag  = G_b * varcom[0] + gxe_b * varcom[1] + nxe_b * varcom[2] + varcom[3]
-                A_diags = [G_b, gxe_b, nxe_b, np.ones(nb)]
+            env_b = env_int_arr2[start:start + nb, :] if nvc >= 3 else None
+            A_diags = block_grm_covariances(nvc, G_b, True, env_b, num_envi_int)
+            v_diag = sum(varcom[j] * A_diags[j] for j in range(nvc))
 
             if np.any(v_diag <= 0):
                 return np.inf, np.full(nvc, np.inf)
@@ -95,24 +80,9 @@ def _sigma_neg_loglik_and_grad_sp(varcom, grm_blocks, y, X, Xresi, alpha_arr2, m
         else:                               # dense block
             nb = G_b.shape[0]
 
-            if nvc >= 3:
-                env_b = env_int_arr2[start:start + nb, :]
-                GxE_b = (env_b @ env_b.T) / num_envi_int * G_b
-                nxe_b = nxe_arr[start:start + nb]
-
-            if nvc == 1:
-                V_b    = np.eye(nb) * varcom[0]
-                A_mats = [np.eye(nb)]
-            elif nvc == 2:
-                V_b    = G_b * varcom[0] + np.eye(nb) * varcom[1]
-                A_mats = [G_b, np.eye(nb)]
-            elif nvc == 3:
-                V_b    = G_b * varcom[0] + GxE_b * varcom[1] + np.eye(nb) * varcom[2]
-                A_mats = [G_b, GxE_b, np.eye(nb)]
-            else:
-                V_b    = (G_b * varcom[0] + GxE_b * varcom[1]
-                          + np.diag(nxe_b) * varcom[2] + np.eye(nb) * varcom[3])
-                A_mats = [G_b, GxE_b, np.diag(nxe_b), np.eye(nb)]
+            env_b = env_int_arr2[start:start + nb, :] if nvc >= 3 else None
+            A_mats = block_grm_covariances(nvc, G_b, False, env_b, num_envi_int)
+            V_b = sum(varcom[j] * A_mats[j] for j in range(nvc))
 
             sign, logdet = np.linalg.slogdet(V_b)
             if sign <= 0:
@@ -239,28 +209,8 @@ class MMSuSiESp:
         nuisance_blocks.extend([E, G])
         nuisance = np.hstack(nuisance_blocks)
 
-        def gls_residualize(target):
-            target_arr = np.asarray(target)
-            was_1d = target_arr.ndim == 1
-            if was_1d:
-                target_arr = target_arr[:, None]
-            Vi_nuisance = self.Vi @ nuisance
-            Vi_target = self.Vi @ target_arr
-            if scipy.sparse.issparse(Vi_nuisance):
-                Vi_nuisance = Vi_nuisance.toarray()
-            if scipy.sparse.issparse(Vi_target):
-                Vi_target = Vi_target.toarray()
-            gram = nuisance.T @ Vi_nuisance
-            rhs = nuisance.T @ Vi_target
-            if np.linalg.matrix_rank(gram) < gram.shape[0]:
-                beta = np.linalg.pinv(gram) @ rhs
-            else:
-                beta = np.linalg.solve(gram, rhs)
-            resid = target_arr - nuisance @ beta
-            return resid.ravel() if was_1d else resid
-
-        y = gls_residualize(y_raw)
-        GE = gls_residualize(GE)
+        y = gls_residualize(y_raw, nuisance, self.Vi)
+        GE = gls_residualize(GE, nuisance, self.Vi)
         self.last_snp_ids = None
         try:
             res = self.mmsusie(GE, y, L=L, maxiter=maxiter, tol=tol, coverage=coverage,
@@ -455,19 +405,7 @@ class MMSuSiESp:
         """
         y = self.df.loc[:, self.trait].values
         if adjust:
-            x_blocks = [np.ones((len(y), 1))]
-            if self.covariate_cols:
-                x_blocks.append(self.df.loc[:, self.covariate_cols].values)
-            if self.categorical_cols:
-                cat_df = pd.get_dummies(
-                    self.df[self.categorical_cols].astype("category"),
-                    drop_first=True, dtype=float,
-                )
-                if cat_df.shape[1] > 0:
-                    x_blocks.append(cat_df.values)
-            if self.env_int_arr2 is not None and len(self.env_int) > 0:
-                x_blocks.append(self.env_int_arr2)
-            xmat = np.hstack(x_blocks)
+            xmat = self.get_fixed()
             if self.Vi is not None:
                 Vi_xmat = self.Vi @ xmat
                 if scipy.sparse.issparse(Vi_xmat):
@@ -477,7 +415,39 @@ class MMSuSiESp:
                 beta = np.linalg.lstsq(xmat, y, rcond=None)[0]
             y = y - xmat @ beta
         return y
-    
+
+    def get_fixed(self):
+        """
+        Build the fixed-effect design matrix used for covariate adjustment:
+        intercept + ``covariate_cols`` + ``categorical_cols`` (one-hot,
+        drop_first) + ``env_int_arr2`` (if ``get_env_int()`` was called).
+
+        Pass the returned matrix as ``fixed=`` to :meth:`mmsusie` to enable full
+        Frisch–Waugh–Lovell adjustment (project covariates out of the genotype as
+        well as the phenotype).
+
+        Returns:
+            np.ndarray: Fixed-effect design (n, k).
+        """
+        n = self.df.shape[0]
+        x_blocks = [np.ones((n, 1))]
+        if self.covariate_cols:
+            x_blocks.append(self.df.loc[:, self.covariate_cols].values)
+        if self.categorical_cols:
+            cat_df = pd.get_dummies(
+                self.df[self.categorical_cols].astype("category"),
+                drop_first=True, dtype=float,
+            )
+            if cat_df.shape[1] > 0:
+                x_blocks.append(cat_df.values)
+        if self.env_int_arr2 is not None and len(self.env_int) > 0:
+            x_blocks.append(self.env_int_arr2)
+        return np.hstack(x_blocks)
+
+    def _gls_residualize(self, mat, fixed):
+        """Project ``fixed`` out of ``mat`` in the current V^{-1} metric."""
+        return gls_residualize(mat, fixed, self.Vi)
+
     def get_genotype(self, bedfile, sid_lst=None, scale=True, *, start=None, end=None):
         """
         Get genotype matrix for self.iid_used ordered individuals.
@@ -496,98 +466,87 @@ class MMSuSiESp:
 
     def cal_spVi(self, varcom):
         """
-        Calculate the Vi and log|V|
+        Build the sparse block-diagonal V^{-1} and log|V| for 1-4 variance
+        components (single GRM); the V structure comes from
+        ``utils.block_grm_covariances`` (shared with the sparse REML routines).
 
         Args:
-            varcom (np.ndarray): Variance components
+            varcom (np.ndarray): Variance components (length 1-4).
         """
         self.varcom = np.array(varcom, dtype=float)
-        Vi_sp = np.array([])
-        V_logdet = 0
-        if len(varcom) == 1:
+        nvc = len(varcom)
+
+        if nvc == 1:                                    # V = σ_e² I
             num_iid_used = len(self.iid_used)
-            Vi_sp = sparse.identity(num_iid_used) / varcom[0]
-            V_logdet = num_iid_used * np.log(varcom[0])
-        elif len(varcom) == 2:
-            V_logdet = 0
-            Vi_lst = []
-            for i in range(len(self.grm_blocks)):
-                tmp_grm_arr2 = self.grm_blocks[i]
-                num_element = tmp_grm_arr2.shape[0]
-                if i == 0:
-                    if num_element != 0:
-                        tmp_arr2 = tmp_grm_arr2 * varcom[0] + varcom[1]
-                        V_logdet += np.sum(np.log(tmp_arr2))
-                        tmp_arr2 = 1 / tmp_arr2
-                        Vi_lst.append(tmp_arr2)
-                else:
-                    tmp_arr2 = tmp_grm_arr2 * varcom[0] + np.eye(num_element) * varcom[1]
-                    _, logdet = np.linalg.slogdet(tmp_arr2)
-                    V_logdet += logdet
-                    tmp_arr2 = np.linalg.inv(tmp_arr2)
-                    Vi_lst.append(tmp_arr2)
-            Vi_sp = make_sparse_block(Vi_lst)
-        elif len(varcom) == 3:
-            num_envi_int = self.env_int_arr2.shape[1]
-            V_logdet = 0
-            start_index = 0
-            Vi_lst = []
-            for i in range(len(self.grm_blocks)):
-                tmp_grm_arr2 = self.grm_blocks[i]
-                num_element = tmp_grm_arr2.shape[0]
-                env_int_arr2_part = self.env_int_arr2[start_index:(start_index + num_element), :]
-                if i == 0:
-                    if num_element != 0:
-                        tmp_gxe_arr2 = np.sum(env_int_arr2_part * env_int_arr2_part, axis=1) / num_envi_int
-                        tmp_gxe_arr2 = tmp_gxe_arr2 * tmp_grm_arr2
-                        tmp_arr2 = tmp_grm_arr2 * varcom[0] + tmp_gxe_arr2 * varcom[1] + varcom[2]
-                        V_logdet += np.sum(np.log(tmp_arr2))
-                        tmp_arr2 = 1 / tmp_arr2
-                        Vi_lst.append(tmp_arr2)
-                else:
-                    tmp_gxe_arr2 = env_int_arr2_part @ env_int_arr2_part.T / num_envi_int
-                    tmp_gxe_arr2 = tmp_gxe_arr2 * tmp_grm_arr2
-                    tmp_arr2 = tmp_grm_arr2 * varcom[0] + tmp_gxe_arr2 * varcom[1] + np.eye(num_element) * varcom[2]
-                    _, logdet = np.linalg.slogdet(tmp_arr2)
-                    V_logdet += logdet
-                    tmp_arr2 = np.linalg.inv(tmp_arr2)
-                    Vi_lst.append(tmp_arr2)
-                start_index += num_element
-            Vi_sp = make_sparse_block(Vi_lst)
-        elif len(varcom) == 4:
-            num_envi_int = self.env_int_arr2.shape[1]
-            nxe_arr = np.sum(self.env_int_arr2 * self.env_int_arr2, axis=1) / num_envi_int
-            V_logdet = 0
-            start_index = 0
-            Vi_lst = []
-            for i in range(len(self.grm_blocks)):
-                tmp_grm_arr2 = self.grm_blocks[i]
-                num_element = tmp_grm_arr2.shape[0]
-                env_int_arr2_part = self.env_int_arr2[start_index:(start_index + num_element), :]
-                nxe_arr_part = nxe_arr[start_index:(start_index + num_element)]
-                if i == 0:
-                    if num_element != 0:
-                        tmp_gxe_arr2 = np.sum(env_int_arr2_part * env_int_arr2_part, axis=1) / num_envi_int
-                        tmp_gxe_arr2 = tmp_gxe_arr2 * tmp_grm_arr2
-                        tmp_arr2 = tmp_grm_arr2 * varcom[0] + tmp_gxe_arr2 * varcom[1] + nxe_arr_part * varcom[2] + varcom[-1]
-                        V_logdet += np.sum(np.log(tmp_arr2))
-                        tmp_arr2 = 1 / tmp_arr2
-                        Vi_lst.append(tmp_arr2)
-                else:
-                    tmp_gxe_arr2 = env_int_arr2_part @ env_int_arr2_part.T / num_envi_int
-                    tmp_gxe_arr2 = tmp_gxe_arr2 * tmp_grm_arr2
-                    tmp_arr2 = tmp_grm_arr2 * varcom[0] + tmp_gxe_arr2 * varcom[1] + np.diag(nxe_arr_part) * varcom[2] + np.eye(num_element) * varcom[-1]
-                    _, logdet = np.linalg.slogdet(tmp_arr2)
-                    V_logdet += logdet
-                    tmp_arr2 = np.linalg.inv(tmp_arr2)
-                    Vi_lst.append(tmp_arr2)
-                start_index += num_element
-            Vi_sp = make_sparse_block(Vi_lst)
-        self.Vi = Vi_sp
+            self.Vi = sparse.identity(num_iid_used) / varcom[0]
+            self.V_logdet = num_iid_used * np.log(varcom[0])
+            return
+
+        num_env = self.env_int_arr2.shape[1] if nvc >= 3 else None
+        V_logdet = 0.0
+        Vi_lst = []
+        start = 0
+        for i, grm_block in enumerate(self.grm_blocks):
+            num_element = grm_block.shape[0]
+            if i == 0 and num_element == 0:             # no singleton individuals
+                continue
+            env_block = (self.env_int_arr2[start:start + num_element, :]
+                         if nvc >= 3 else None)
+            A = block_grm_covariances(nvc, grm_block, i == 0, env_block, num_env)
+            V_block = sum(varcom[j] * A[j] for j in range(nvc))
+            if i == 0:                                  # singleton diagonal block
+                V_logdet += np.sum(np.log(V_block))
+                Vi_lst.append(1.0 / V_block)
+            else:                                       # dense related block
+                _, logdet = np.linalg.slogdet(V_block)
+                V_logdet += logdet
+                Vi_lst.append(np.linalg.inv(V_block))
+            start += num_element
+        self.Vi = make_sparse_block(Vi_lst)
         self.V_logdet = V_logdet
-    
+
     def mmsusie(self, X, y, L=10, maxiter=100, tol=1e-3, coverage=0.95,
-                min_abs_corr=0.5, prior_tol=1e-09, estimate_sigma=True):
+                min_abs_corr=0.5, prior_tol=1e-09, estimate_sigma=True, fixed=None):
+        """
+        Mixed-model SuSiE fine-mapping via the IBSS coordinate-ascent algorithm.
+
+        Fits ``y ~ N(Σ_l X (α_l ∘ μ_l), V)`` — a sum of ``L`` single-effect
+        regressions on the genotype ``X`` with residual covariance ``V`` encoding
+        the (sparse) GRM. Each IBSS sweep updates one single-effect regression
+        (SER) at a time in the ``V^{-1}`` (GLS) metric until the ELBO converges.
+
+        Args:
+            X (np.ndarray): Genotype matrix (n, p), standardized — the fine-mapping
+                design; each column is a candidate causal variant.
+            y (np.ndarray): Phenotype (n,), already covariate-adjusted (see
+                :meth:`get_y`) unless ``fixed`` is supplied.
+            L (int): Maximum number of causal effects (single-effect components).
+            maxiter (int): Maximum IBSS sweeps. tol (float): ELBO convergence tol.
+            coverage (float): Target credible-set coverage (e.g. 0.95).
+            min_abs_corr (float): Minimum absolute correlation for CS purity filtering.
+            prior_tol (float): Prune effects whose prior variance falls below this.
+            estimate_sigma (bool): Jointly re-estimate the variance components each
+                sweep (requires :meth:`cal_spVi` to have been called).
+            fixed (np.ndarray or None): Fixed-effect design (e.g. :meth:`get_fixed`).
+                When given, both ``y`` and the genotype are projected onto the
+                covariate orthogonal complement in the ``V^{-1}`` metric — full
+                Frisch–Waugh–Lovell — and re-projected whenever ``estimate_sigma``
+                updates ``V``. When None (default) only ``y`` is pre-adjusted
+                (backward-compatible).
+
+        Returns:
+            dict: ``pip`` (per-variant PIP), ``cs`` (credible sets), ``alpha``
+            (L×p assignment probabilities), ``mu`` (posterior mean effects),
+            ``sigma0`` (per-effect prior variances), ``lbf``/``KL``/``elbo``.
+
+        Notation (standard SuSiE / mixed-model symbols used below):
+            Vi = V^{-1};  xtVix_mat = X'V^{-1}X,  xtVix = its diagonal;
+            shat2s = 1/xtVix = per-variant GLS effect variance (ŝ²);
+            betahats = single-variant GLS effect estimates;
+            alpha_arr2 (L×p) = α, mu_arr2 = μ (posterior mean), mu2_arr2 = 2nd moment;
+            Xresi = current fitted genotype signal Σ_l X(α_l∘μ_l);
+            sigma0 = SER prior variance;  lbf = log Bayes factor;  KL = KL divergence.
+        """
         p = X.shape[1]
         n = X.shape[0]
         if p < L:
@@ -604,6 +563,16 @@ class MMSuSiESp:
         # Local copies updated when estimate_sigma re-estimates V.
         Vi = self.Vi
         V_logdet = self.V_logdet
+
+        # Full Frisch–Waugh–Lovell: project the fixed effects out of BOTH y and
+        # the genotype in the V^{-1} metric. Keep the raw copies so the projection
+        # can be refreshed whenever estimate_sigma updates V.
+        fixed_arr = None
+        if fixed is not None:
+            fixed_arr = np.asarray(fixed, dtype=float)
+            X_raw, y_raw = X, y
+            X = self._gls_residualize(X, fixed_arr)
+            y = self._gls_residualize(y, fixed_arr)
 
         logging.info("Starting mmsusie...")
         logging.info("Calculating shat2s...")
@@ -672,19 +641,28 @@ class MMSuSiESp:
                 mu2_arr2[l, :] = post_mean2_arr
                 lbf_arr[l] = lbf_model
 
+                # KL(posterior || prior) for this effect = (expected log-lik under
+                # the SER posterior) − (marginal log-lik); the E[·] over the effect
+                # expands resi'Vi resi into mean and second-moment terms.
                 SER_posterior_e_loglik = - 0.5 * n * np.log(2 * np.pi) - 0.5 * V_logdet \
                             - 0.5 * ( resi @ (Vi @ resi) -
                                       2 * np.sum(resi @ (Vi @ (X @ (alpha_arr * post_mean_arr)))) +
                                       np.sum(xtVix * (alpha_arr * post_mean2_arr)) )
                 KL_arr[l] = -loglik + SER_posterior_e_loglik
+
+                # Add this effect back into the fitted genotype signal.
                 Xresi = Xresi + X @ (alpha_arr * post_mean_arr)
 
             logging.info(f"Estimated prior variances: {sigma0_arr.T}")
-            mean_arr2 = alpha_arr2 * mu_arr2
+            # Posterior correction for the fitted signal's variance:
+            #   Σ_l E[(Xβ_l)'Vi(Xβ_l)] − Σ_l (E[Xβ_l])'Vi(E[Xβ_l]),
+            # i.e. the extra variance from posterior uncertainty across effects.
+            mean_arr2 = alpha_arr2 * mu_arr2                       # posterior mean effect α∘μ
             posterior_correction = (
                 np.sum(np.sum(alpha_arr2 * mu2_arr2, axis=0) * xtVix)
                 - np.sum((mean_arr2 @ xtVix_mat) * mean_arr2)
             )
+            # ELBO = Gaussian data term (residual + posterior correction) − Σ KL.
             elbo_arr[iter + 1] = - 0.5 * n * np.log(2 * np.pi) - 0.5 * V_logdet \
                     - 0.5 * ((y - Xresi) @ (Vi @ (y - Xresi)) +
                     posterior_correction) - np.sum(KL_arr)
@@ -710,6 +688,12 @@ class MMSuSiESp:
                 self.cal_spVi(self.varcom)
                 Vi = self.Vi
                 V_logdet = self.V_logdet
+                if fixed_arr is not None:
+                    # Re-project y and genotype with the updated V, and rebuild the
+                    # residual fit so it stays consistent with the re-projected X.
+                    X = self._gls_residualize(X_raw, fixed_arr)
+                    y = self._gls_residualize(y_raw, fixed_arr)
+                    Xresi = X @ np.sum(alpha_arr2 * mu_arr2, axis=0)
                 vX = Vi @ X
                 if scipy.sparse.issparse(vX):
                     vX = vX.toarray()
@@ -744,6 +728,12 @@ class MMSuSiESp:
         return res_dct
 
     def out_mmsusie(self, res_dct, out_file):
+        """
+        Write the fine-mapping result tables to ``<out_file>.{pip,alpha,mu,cs}.txt``.
+
+        The PIP index is labelled ``SNP`` when the columns are genotype variants
+        (``last_snp_ids`` set by :meth:`get_genotype`) and ``ENV`` otherwise.
+        """
         pip_df = res_dct["pip"]
         env_names = pip_df.index.tolist()
         if self.last_snp_ids is not None and len(self.last_snp_ids) == len(env_names):

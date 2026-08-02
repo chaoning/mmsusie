@@ -24,7 +24,6 @@ setup(
         "scipy>=1.7",
         "pysnptools>=0.5",
         "tqdm>=4.60",
-        "joblib>=1.2",
     ],
     classifiers=[
         "Programming Language :: Python :: 3",

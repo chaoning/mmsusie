@@ -72,66 +72,83 @@ def filter_prior_components_mmsusie(alpha_arr2, mu_arr2, sigma0_arr, prior_tol):
 
 
 def getPIP(alpha_arr2):
-        p = alpha_arr2.shape[1]
-        L = alpha_arr2.shape[0]
-        alpha_arr2_tmp = 1 - alpha_arr2
-        pip_arr = np.ones(p)
-        for l in range(L):
-            pip_arr = pip_arr * alpha_arr2_tmp[l, :]
-        pip_arr = 1 - pip_arr
-        return pip_arr
+    """
+    Posterior inclusion probability (PIP) per variant, aggregated over the
+    L single effects: ``PIP_j = 1 − Π_l (1 − α_{l,j})``.
+
+    Args:
+        alpha_arr2 (np.ndarray): Assignment probabilities α (L, p).
+
+    Returns:
+        np.ndarray: PIP per variant (p,).
+    """
+    L, p = alpha_arr2.shape
+    pip_arr = np.ones(p)
+    for l in range(L):
+        pip_arr = pip_arr * (1 - alpha_arr2[l, :])
+    return 1 - pip_arr
 
 
-def in_CS_x(x: np.ndarray, coverage: float):
+def in_CS_x(alpha_row: np.ndarray, coverage: float):
+    """
+    Build the ``coverage``-level credible set for one single effect: the smallest
+    set of variants whose assignment probabilities sum to ≥ ``coverage``.
 
-    # Get the indices that would sort x in descending order
-    sorted_indices = np.argsort(-x)
-    sorted_x = x[sorted_indices]
+    Args:
+        alpha_row (np.ndarray): Assignment probabilities α_l for one effect (p,).
+        coverage (float): Target cumulative probability (e.g. 0.95).
 
-    # Compute the cumulative sum of sorted values and Find the minimum number of elements needed to reach the coverage threshold
+    Returns:
+        np.ndarray: 0/1 membership indicator (p,).
+    """
+    # Add variants in descending probability until the cumulative mass reaches coverage.
+    sorted_indices = np.argsort(-alpha_row)
+    sorted_alpha = alpha_row[sorted_indices]
+
     cumulative_sum = 0.0
     count = 0
-    for i in range(len(sorted_x)):
-        cumulative_sum += sorted_x[i]
+    for i in range(len(sorted_alpha)):
+        cumulative_sum += sorted_alpha[i]
         count += 1
         if cumulative_sum >= coverage:
             break
 
-    # Create a binary result vector indicating selected elements
-    result = np.zeros_like(x, dtype=int)
+    result = np.zeros_like(alpha_row, dtype=int)
     result[sorted_indices[:count]] = 1
     return result
 
 
 def in_CS(alpha_arr2: np.ndarray, coverage: float):
-    p = alpha_arr2.shape[1]
-    L = alpha_arr2.shape[0]
+    """
+    Apply :func:`in_CS_x` to every single effect, returning an (L, p) 0/1 matrix
+    of credible-set membership (one row per effect).
+    """
+    L, p = alpha_arr2.shape
     status = np.zeros((L, p), dtype=int)
-    for i in range(L):
-        x = alpha_arr2[i, :]
-        status[i, :] = in_CS_x(x, coverage)
+    for l in range(L):
+        status[l, :] = in_CS_x(alpha_arr2[l, :], coverage)
     return status
 
 
 def get_CS(status: np.ndarray) -> list[list[int]]:
+    """
+    Convert the (L, p) 0/1 membership matrix from :func:`in_CS` into a list of
+    credible sets, each a list of the included variant indices.
+    """
     cs = []
-
-    for i in range(status.shape[0]):
-        current_row_indices = []
-        for j in range(status.shape[1]):
-            if status[i, j] != 0:
-                current_row_indices.append(j)
-        cs.append(current_row_indices)
-
+    for l in range(status.shape[0]):
+        cs.append([j for j in range(status.shape[1]) if status[l, j] != 0])
     return cs
 
+
 def compute_claimed_coverage(cs: list[list[int]], alpha: np.ndarray) -> np.ndarray:
+    """
+    Actual probability mass captured by each credible set — the sum of its
+    variants' assignment probabilities (``Σ_{j∈cs_l} α_{l,j}``).
+    """
     claimed_coverage = np.zeros(len(cs))
-
-    for i, current_set in enumerate(cs):
-        total = sum(alpha[i, index] for index in current_set)
-        claimed_coverage[i] = total
-
+    for l, current_set in enumerate(cs):
+        claimed_coverage[l] = sum(alpha[l, index] for index in current_set)
     return claimed_coverage
 
 
@@ -194,3 +211,91 @@ def make_sparse_block(block_lst):
             return part1
     else:
         return sparse.block_diag(block_lst[1:], format='csr') if len(block_lst) > 1 else sparse.csr_matrix((0, 0))
+
+
+def block_grm_covariances(nvc, grm_block, is_singleton, env_block=None, num_env=None):
+    """
+    Build the per-block variance-component matrices ``A_k`` for a single-GRM model
+    with 1-4 components — the single source of truth for the V structure shared by
+    ``cal_spVi`` and the sparse REML routines:
+
+        nvc==1: [I]
+        nvc==2: [GRM, I]
+        nvc==3: [GRM, GRM∘EE'/K, I]
+        nvc==4: [GRM, GRM∘EE'/K, diag(‖e‖²/K), I]
+
+    (I / residual is always last, so ``varcom[-1]`` is the residual variance.)
+
+    Args:
+        nvc (int): Number of variance components (1-4).
+        grm_block: For a singleton block, the 1-D GRM diagonals; for a related
+            block, the dense GRM sub-matrix.
+        is_singleton (bool): True for the singleton diagonal block (returns 1-D
+            vectors), False for a dense related block (returns matrices).
+        env_block (np.ndarray or None): Environment rows for this block (nb, K);
+            required when ``nvc >= 3``.
+        num_env (int or None): Number of environments K; required when ``nvc >= 3``.
+
+    Returns:
+        list: ``A_k`` for k = 0 .. nvc-1 (vectors if singleton, else matrices).
+    """
+    if is_singleton:
+        nb = len(grm_block)
+        residual = np.ones(nb)
+        if nvc == 1:
+            return [residual]
+        A = [grm_block]
+        if nvc >= 3:
+            nxe = np.sum(env_block * env_block, axis=1) / num_env   # ‖e‖²/K
+            A.append(nxe * grm_block)                               # diag(GRM∘EE'/K)
+            if nvc == 4:
+                A.append(nxe)                                      # diag(‖e‖²/K)
+        A.append(residual)
+        return A
+
+    nb = grm_block.shape[0]
+    residual = np.eye(nb)
+    if nvc == 1:
+        return [residual]
+    A = [grm_block]
+    if nvc >= 3:
+        gxe = (env_block @ env_block.T) / num_env * grm_block       # GRM∘EE'/K
+        A.append(gxe)
+        if nvc == 4:
+            nxe = np.sum(env_block * env_block, axis=1) / num_env
+            A.append(np.diag(nxe))
+    A.append(residual)
+    return A
+
+
+def gls_residualize(mat, fixed, Vi):
+    """
+    Project the fixed effects out of ``mat`` in the V^{-1} metric:
+    ``(I − X(X'V⁻¹X)⁻¹X'V⁻¹) mat`` (full Frisch–Waugh–Lovell in the GLS metric).
+
+    Works for a vector or a 2-D matrix; ``Vi`` may be dense or ``scipy.sparse``.
+    Falls back to a pseudo-inverse if ``X'V⁻¹X`` is rank-deficient.
+
+    Args:
+        mat (np.ndarray): Target to residualize — (n,) or (n, m).
+        fixed (np.ndarray): Fixed-effect design X — (n, k).
+        Vi: Inverse phenotypic covariance V^{-1} — dense or sparse (n, n).
+
+    Returns:
+        np.ndarray: Residualized target, same shape as ``mat``.
+    """
+    Vi_fixed = Vi @ fixed
+    if sparse.issparse(Vi_fixed):
+        Vi_fixed = Vi_fixed.toarray()
+    gram = fixed.T @ Vi_fixed                      # X'V⁻¹X (k×k)
+    arr = np.asarray(mat, dtype=float)
+    was_1d = arr.ndim == 1
+    if was_1d:
+        arr = arr[:, None]
+    rhs = Vi_fixed.T @ arr                          # X'V⁻¹ mat
+    if np.linalg.matrix_rank(gram) < gram.shape[0]:
+        coef = np.linalg.pinv(gram) @ rhs
+    else:
+        coef = np.linalg.solve(gram, rhs)
+    resid = arr - fixed @ coef
+    return resid.ravel() if was_1d else resid

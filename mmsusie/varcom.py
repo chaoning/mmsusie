@@ -7,6 +7,8 @@ import numpy as np
 import pandas as pd
 from scipy import linalg
 
+from mmsusie.utils import block_grm_covariances
+
 
 class WeightEMAI:
     """
@@ -184,6 +186,226 @@ class WeightEMAI:
         else:
             logging.info("Variances not converged.")
         return var_com
+
+
+def _evaluate_reml_iteration_sp(varcom, grm_blocks, y, xmat, env_int_arr2=None):
+    """
+    One REML evaluation on a sparse block-diagonal GRM (single GRM, 1-4 variance
+    components) — matches the four cases of ``MMSuSiESp.cal_spVi``:
+
+        len==1: V = σ_e² I
+        len==2: V = σ_g² GRM + σ_e² I
+        len==3: V = σ_g² GRM + σ_gxe² (GRM ∘ EE'/K) + σ_e² I
+        len==4: + σ_gxe2_E diag(‖e‖²/K)
+
+    Works entirely block-wise so V and V^{-1} are never materialised as n×n:
+    ``grm_blocks[0]`` is a 1-D vector of GRM diagonals for singleton individuals,
+    ``grm_blocks[1:]`` are dense GRM sub-matrices for related groups.
+
+    Fixed effects ``xmat`` enter through the REML projection
+    ``P = V^{-1} − V^{-1}X(X'V^{-1}X)^{-1}X'V^{-1}`` (the ``log|X'V^{-1}X|``
+    correction), so the returned score/AI are the REML ones.
+
+    Returns:
+        (fd_mat, ai_mat): REML score vector and average-information matrix
+        (both length/shape nvc), or ``None`` if V is not positive at ``varcom``.
+    """
+    nvc = len(varcom)
+    n = y.shape[0]
+    k = xmat.shape[1]
+    num_env = env_int_arr2.shape[1] if nvc >= 3 else None
+
+    XtViX = np.zeros((k, k))
+    XtViy = np.zeros(k)
+    trViA = np.zeros(nvc)          # tr(V^{-1} A_k)
+    blocks = []                    # cached per-block quantities for pass 2
+
+    start = 0
+    for i, G_b in enumerate(grm_blocks):
+        if i == 0:                                   # singleton diagonal block
+            nb = len(G_b)
+            if nb == 0:
+                continue
+            sl = slice(start, start + nb)
+            start += nb
+            y_b = y[sl]
+            X_b = xmat[sl, :]
+            env_b = env_int_arr2[sl, :] if nvc >= 3 else None
+            A = block_grm_covariances(nvc, G_b, True, env_b, num_env)
+            v_diag = sum(varcom[j] * A[j] for j in range(nvc))
+            if np.any(v_diag <= 0):
+                return None
+            vi = 1.0 / v_diag
+            ViX_b = vi[:, None] * X_b
+            Viy_b = vi * y_b
+            XtViX += X_b.T @ ViX_b
+            XtViy += X_b.T @ Viy_b
+            for j in range(nvc):
+                trViA[j] += np.dot(vi, A[j])
+            blocks.append({"kind": "diag", "sl": sl, "y": y_b, "ViX": ViX_b,
+                           "Viy": Viy_b, "vi": vi, "A": A})
+        else:                                        # dense related block
+            nb = G_b.shape[0]
+            sl = slice(start, start + nb)
+            start += nb
+            y_b = y[sl]
+            X_b = xmat[sl, :]
+            env_b = env_int_arr2[sl, :] if nvc >= 3 else None
+            A = block_grm_covariances(nvc, G_b, False, env_b, num_env)
+            V_b = sum(varcom[j] * A[j] for j in range(nvc))
+            try:
+                Vi_b = np.linalg.inv(V_b)
+            except np.linalg.LinAlgError:
+                return None
+            ViX_b = Vi_b @ X_b
+            Viy_b = Vi_b @ y_b
+            XtViX += X_b.T @ ViX_b
+            XtViy += X_b.T @ Viy_b
+            for j in range(nvc):
+                trViA[j] += np.sum(Vi_b * A[j])
+            blocks.append({"kind": "dense", "sl": sl, "y": y_b, "ViX": ViX_b,
+                           "Viy": Viy_b, "Vi": Vi_b, "A": A})
+
+    # Fixed-effect projection: β = (X'V⁻¹X)⁻¹ X'V⁻¹y, Py = V⁻¹y − V⁻¹Xβ.
+    C = np.linalg.inv(XtViX)
+    beta = C @ XtViy
+
+    Py = np.empty(n)
+    for bl in blocks:
+        Py[bl["sl"]] = bl["Viy"] - bl["ViX"] @ beta
+
+    # wv_k = A_k Py  and  M_k = X'V⁻¹ A_k V⁻¹X  (for tr(P A_k) = trViA − tr(C M_k)).
+    Wv = np.zeros((n, nvc))
+    Mk = [np.zeros((k, k)) for _ in range(nvc)]
+    for bl in blocks:
+        sl, A, ViX_b = bl["sl"], bl["A"], bl["ViX"]
+        Py_b = Py[sl]
+        for j in range(nvc):
+            Aj = A[j]
+            if bl["kind"] == "diag":
+                Wv[sl, j] = Aj * Py_b
+                Mk[j] += ViX_b.T @ (Aj[:, None] * ViX_b)
+            else:
+                Wv[sl, j] = Aj @ Py_b
+                Mk[j] += ViX_b.T @ (Aj @ ViX_b)
+
+    # REML score: fd_k = -0.5 [ tr(P A_k) − Py'A_k Py ].
+    fd_mat = np.zeros(nvc)
+    for j in range(nvc):
+        tr_PA = trViA[j] - np.sum(C * Mk[j])
+        fd_mat[j] = -0.5 * (tr_PA - np.dot(Py, Wv[:, j]))
+
+    # Average information: AI = 0.5 Wv' P Wv, with P applied block-wise.
+    XtViWv = np.zeros((k, nvc))
+    for bl in blocks:
+        XtViWv += bl["ViX"].T @ Wv[bl["sl"], :]
+    CXtViWv = C @ XtViWv
+    PWv = np.zeros((n, nvc))
+    for bl in blocks:
+        sl = bl["sl"]
+        if bl["kind"] == "diag":
+            ViWv_b = bl["vi"][:, None] * Wv[sl, :]
+        else:
+            ViWv_b = bl["Vi"] @ Wv[sl, :]
+        PWv[sl, :] = ViWv_b - bl["ViX"] @ CXtViWv
+    ai_mat = 0.5 * (Wv.T @ PWv)
+    ai_mat = 0.5 * (ai_mat + ai_mat.T)
+
+    return fd_mat, ai_mat
+
+
+class WeightEMAISp(WeightEMAI):
+    """
+    Weighted EM-AI REML estimator for a **sparse block-diagonal GRM** (single GRM,
+    1-4 variance components), the sparse counterpart of :class:`WeightEMAI`.
+
+    Uses the same weighted (1-γ)AI + γEM positive-update strategy, but computes
+    the REML score and average-information matrix block-wise (never forming n×n V),
+    so the estimated components plug straight into ``MMSuSiESp.cal_spVi``.
+
+    Variance-component layout (matching ``cal_spVi``):
+    ``[σ_g², σ_e²]`` (n_varcom=2), ``[σ_g², σ_gxe², σ_e²]`` (3),
+    ``[σ_g², σ_gxe², σ_gxe2_E, σ_e²]`` (4), or ``[σ_e²]`` (1).
+    """
+
+    def fit(self, y, xmat, grm_blocks, env_int_arr2=None, n_varcom=2, init=None):
+        """
+        Estimate variance components by weighted EM-AI REML on the sparse GRM.
+
+        Args:
+            y (array-like): Phenotype vector (n,).
+            xmat (array-like): Fixed-effect design (n, k) — include an intercept
+                and any covariates / one-hot categoricals / environment main
+                effects, matching the model used downstream.
+            grm_blocks (list): Sparse GRM blocks from ``MMSuSiESp.read_sp_grm``
+                (``grm_blocks[0]`` = singleton diagonals, ``grm_blocks[1:]`` =
+                dense related sub-matrices).
+            env_int_arr2 (np.ndarray or None): Environment matrix (n, K); required
+                when ``n_varcom >= 3`` (the GxE terms).
+            n_varcom (int): Number of variance components (1-4).
+            init (array-like or None): Initial components; defaults to var(y)/n_varcom.
+
+        Returns:
+            numpy.ndarray: Estimated variance components (length n_varcom).
+        """
+        if n_varcom not in (1, 2, 3, 4):
+            raise ValueError("n_varcom must be 1, 2, 3 or 4.")
+        y = np.asarray(y, dtype=float).reshape(-1)
+        n = y.shape[0]
+        xmat = np.asarray(xmat, dtype=float)
+        if xmat.ndim == 1:
+            xmat = xmat.reshape(-1, 1)
+        if xmat.shape[0] != n:
+            raise ValueError(f"xmat has {xmat.shape[0]} rows but y has {n}.")
+        if n_varcom >= 3:
+            if env_int_arr2 is None:
+                raise ValueError("env_int_arr2 is required when n_varcom >= 3.")
+            env_int_arr2 = np.asarray(env_int_arr2, dtype=float)
+            if env_int_arr2.shape[0] != n:
+                raise ValueError("env_int_arr2 rows must match phenotype length.")
+
+        if init is None:
+            total = float(np.var(y))
+            if total <= 0:
+                total = 1.0
+            var_com = np.full(n_varcom, total / n_varcom, dtype=float)
+        else:
+            var_com = np.asarray(init, dtype=float).reshape(-1)
+            if var_com.size != n_varcom:
+                raise ValueError(f"init must contain {n_varcom} values.")
+            if np.any(var_com <= 0):
+                raise ValueError("All initial variance components must be positive.")
+
+        # Non-residual components are all n×n → EM "size" is n, matching WeightEMAI.
+        random_sizes = [n] * (n_varcom - 1)
+
+        logging.info("##### Start sparse REML iteration #####")
+        cc_par_val = np.inf
+        converged = False
+        for iter_idx in range(1, self.maxiter + 1):
+            logging.info("Round: %d", iter_idx)
+            evaluated = _evaluate_reml_iteration_sp(var_com, grm_blocks, y, xmat, env_int_arr2)
+            if evaluated is None:
+                raise RuntimeError("Non-positive-definite V during REML; check inputs/init.")
+            fd_mat, ai_mat = evaluated
+            em_mat = self._build_em_matrix(var_com, random_sizes, n)
+            weight, wemai_mat, delta, var_com_new = self._find_positive_update(
+                fd_mat, ai_mat, em_mat, var_com)
+
+            cc_par_val = self._relative_update_norm(delta, var_com_new)
+            var_com = var_com_new
+            logging.info("Norm of update vector: %.6e", cc_par_val)
+            logging.info("Updated variances: %s", " ".join(np.asarray(var_com, dtype=str)))
+            if cc_par_val < self.cc_par:
+                converged = True
+                break
+
+        self.last_iterations = iter_idx
+        self.last_update_norm = cc_par_val
+        self.last_converged = converged
+        logging.info("Variances converged." if converged else "Variances not converged.")
+        return var_com
+
 
 def _normalize_grm_prefix(grm_prefix):
     """

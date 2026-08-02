@@ -3,7 +3,7 @@
 from .gmatrix import agmat
 from .mmsusie_sp import MMSuSiESp
 from .mmsusie_dense import MMSuSiEDense
-from .varcom import WeightEMAI, prepare_varcom_inputs
+from .varcom import WeightEMAI, WeightEMAISp, prepare_varcom_inputs
 
 # Backward-compatible alias (old name before the Sp/Dense split)
 MMSuSiE = MMSuSiESp
@@ -15,6 +15,7 @@ __all__ = [
     "MMSuSiEDense",
     "MMSuSiE",
     "WeightEMAI",
+    "WeightEMAISp",
     "prepare_varcom_inputs",
     "agmat",
     "__version__",
