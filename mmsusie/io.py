@@ -87,6 +87,17 @@ def read_genotype_matrix(bedfile, iid_lst, sid_lst=None, scale=True, *, start=No
     genotype_matrix = snp_on_disk[iid_used_index, snp_used_index].read().val
     genotype_matrix = pd.DataFrame(genotype_matrix)
     genotype_matrix.fillna(genotype_matrix.mean(), inplace=True)
+    # A column that is entirely missing has a NaN column-mean, so the fill above
+    # leaves it NaN (which would then propagate through standardization). Fill any
+    # such fully-missing SNP with 0 and warn instead of silently emitting NaNs.
+    all_missing = [c for c in genotype_matrix.columns if genotype_matrix[c].isna().all()]
+    if all_missing:
+        miss_ids = [snp_used_ids[c] for c in all_missing]
+        logging.warning(
+            f"{len(all_missing)} SNP(s) entirely missing; filled with 0: "
+            f"{miss_ids[:10]}{' ...' if len(miss_ids) > 10 else ''}"
+        )
+        genotype_matrix.fillna(0.0, inplace=True)
     genotype_matrix = genotype_matrix.values
 
     if scale:

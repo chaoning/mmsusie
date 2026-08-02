@@ -250,6 +250,17 @@ class MMSuSiEDense:
         refreshed whenever ``estimate_sigma`` updates V. When None (default), only
         ``y`` is treated as pre-adjusted (backward-compatible; use ``process_y``).
         """
+        # Normalize/validate shapes up front so a (n, 1) phenotype or a mismatched
+        # design fails with a clear message instead of a cryptic broadcast error.
+        X = np.asarray(X, dtype=float)
+        if X.ndim != 2:
+            raise ValueError(f"X must be 2-D (n, p); got shape {X.shape}.")
+        y = np.asarray(y, dtype=float).reshape(-1)
+        if y.shape[0] != X.shape[0]:
+            raise ValueError(f"y length ({y.shape[0]}) must match X rows ({X.shape[0]}).")
+        if fixed is not None and np.asarray(fixed).shape[0] != X.shape[0]:
+            raise ValueError(f"fixed rows ({np.asarray(fixed).shape[0]}) must match X rows ({X.shape[0]}).")
+
         p = X.shape[1]
         n = X.shape[0]
         if p < L:

@@ -209,13 +209,14 @@ class MMSuSiESp:
         nuisance_blocks.extend([E, G])
         nuisance = np.hstack(nuisance_blocks)
 
-        y = gls_residualize(y_raw, nuisance, self.Vi)
-        GE = gls_residualize(GE, nuisance, self.Vi)
         self.last_snp_ids = None
         try:
-            res = self.fit(GE, y, L=L, maxiter=maxiter, tol=tol, coverage=coverage,
+            # Pass the RAW interaction/phenotype with fixed=nuisance and let fit() do the
+            # FWL projection, so it is re-projected whenever estimate_sigma updates V
+            # (rather than frozen at the initial V by a manual pre-projection here).
+            res = self.fit(GE, y_raw, L=L, maxiter=maxiter, tol=tol, coverage=coverage,
                            min_abs_corr=min_abs_corr, prior_tol=prior_tol,
-                           estimate_sigma=estimate_sigma)
+                           estimate_sigma=estimate_sigma, fixed=nuisance)
             res["lead_snp"] = lead_snp_ids[0] if lead_snp_ids else str(snp_id)
             self.out(res, out_file)
         finally:
@@ -572,6 +573,17 @@ class MMSuSiESp:
             Xresi = current fitted genotype signal Σ_l X(α_l∘μ_l);
             sigma0 = SER prior variance;  lbf = log Bayes factor;  KL = KL divergence.
         """
+        # Normalize/validate shapes up front so a (n, 1) phenotype or a mismatched
+        # design fails with a clear message instead of a cryptic broadcast error.
+        X = np.asarray(X, dtype=float)
+        if X.ndim != 2:
+            raise ValueError(f"X must be 2-D (n, p); got shape {X.shape}.")
+        y = np.asarray(y, dtype=float).reshape(-1)
+        if y.shape[0] != X.shape[0]:
+            raise ValueError(f"y length ({y.shape[0]}) must match X rows ({X.shape[0]}).")
+        if fixed is not None and np.asarray(fixed).shape[0] != X.shape[0]:
+            raise ValueError(f"fixed rows ({np.asarray(fixed).shape[0]}) must match X rows ({X.shape[0]}).")
+
         p = X.shape[1]
         n = X.shape[0]
         if p < L:
@@ -797,7 +809,9 @@ class MMSuSiESp:
         )
         with open(out_file + ".cs.txt", "w") as f:
             for vec in res_dct["cs"]:
-                f.write(" ".join([env_names[int(i)] for i in vec]) + "\n")
+                # str() so integer feature names (plain-matrix use, no SNP/ENV labels)
+                # don't crash the join.
+                f.write(" ".join([str(env_names[int(i)]) for i in vec]) + "\n")
 
     # Backward-compatible alias for the pre-rename method name.
     out_mmsusie = out
