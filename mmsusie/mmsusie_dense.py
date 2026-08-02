@@ -285,6 +285,11 @@ class MMSuSiEDense:
         Vi = self.Vi
         V_logdet = self.V_logdet
 
+        # Raw standardized genotype, kept for credible-set purity: purity measures
+        # biological LD between the CS variants, so it is computed on the genotype
+        # itself, not on the FWL-projected / GLS design used for fitting.
+        X_geno = X
+
         # Full Frisch–Waugh–Lovell: project fixed effects out of BOTH y and the
         # genotype in the V^{-1} metric (keep raw copies to refresh on V updates).
         fixed_arr = None
@@ -439,7 +444,7 @@ class MMSuSiEDense:
         status = in_CS(alpha_arr2, coverage)
         cs_lst = get_CS(status)
         claimed_coverage_arr = compute_claimed_coverage(cs_lst, alpha_arr2)
-        cs_lst, claimed_coverage_arr = get_cs_purity(cs_lst, claimed_coverage_arr, X, min_abs_corr)
+        cs_lst, claimed_coverage_arr = get_cs_purity(cs_lst, claimed_coverage_arr, X_geno, min_abs_corr)
         res_dct["cs"] = cs_lst
         res_dct["claimed_coverage"] = claimed_coverage_arr
         res_dct["lbf"] = lbf_arr

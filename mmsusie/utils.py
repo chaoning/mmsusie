@@ -158,12 +158,19 @@ def get_cs_purity(cs: list[list[int]],
                   X: np.ndarray,
                   min_abs_corr: float) -> tuple[list[list[int]], np.ndarray]:
     """
-    Filter credible sets based on their purity using minimum absolute correlation.
+    Filter credible sets by purity: the minimum absolute pairwise correlation among
+    the CS variants must exceed ``min_abs_corr``.
+
+    Purity here is **biological LD** — the ordinary Pearson correlation of the raw
+    (standardized) genotype columns, as in susieR — so ``X`` should be the genotype
+    itself, NOT the FWL-projected / GLS design used for fitting. It answers "are these
+    variants indistinguishable by LD?", a genotype-correlation question. Singleton CS
+    are always kept.
 
     Parameters:
     - cs: List of credible sets (each a list of variable indices)
     - claimed_coverage: 1D NumPy array of coverage values
-    - X: 2D NumPy array (samples x features) - full design matrix
+    - X: 2D NumPy array (samples x features) - raw standardized genotype
     - min_abs_corr: Minimum absolute correlation threshold
 
     Returns:
