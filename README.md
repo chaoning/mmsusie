@@ -86,8 +86,8 @@ ms.cal_Vi(inputs["gmat"], var_com)
 G = ms.get_genotype(
     "test",
     iid_lst=inputs["used_iids"],
-    start="rs11132426",
-    end="rs7694910",
+    start="rs2165666",
+    end="rs4863332",
 )
 # fixed=inputs["xmat"] gives full Frisch–Waugh–Lovell: the covariates are projected
 # out of BOTH y and the genotype in the V^{-1} metric (no separate process_y needed).
@@ -106,6 +106,11 @@ pd.concat([df_out, df_G], axis=1).to_csv("output/test_mmsusie_data.txt", sep="\t
 # 6) Export result tables
 ms.out(result, out_file="output/test_mmsusie")
 ```
+
+The example region (`rs2165666 … rs4863332`) contains **two independent causal
+SNPs** — `rs1487590` and `rs1462069` (in low mutual LD) — so fine-mapping returns
+**two credible sets**, one per signal, each pinpointing its causal SNP (PIP ≈ 1).
+Both `MMSuSiEDense` / `MMSuSiESp` and `susieR` recover the same two sets.
 
 ### Comparison with susieR
 
@@ -186,7 +191,7 @@ ms.cal_spVi(varcom)  # varcom = [sigma_g2, sigma_e2]
 y = ms.get_y(adjust=False)
 
 # 4) Load genotype for region of interest
-G = ms.get_genotype("test", start="rs11132426", end="rs7694910")
+G = ms.get_genotype("test", start="rs2165666", end="rs4863332")
 
 # 5) Run MMSuSiE with full FWL covariate adjustment
 # fixed=ms.get_fixed() projects the covariates out of BOTH y and the genotype in the

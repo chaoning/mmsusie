@@ -158,6 +158,104 @@ def simulate_pheno_from_bed(
     return out_df
 
 
+def simulate_finemap_example(bed_file, out_file, causal_snps, causal_effects, region,
+                             n_cov=3, n_bg_causal=200, bg_sd=0.35, cov_sd=0.15,
+                             noise_sd=1.0, trait_name="pheno", seed=42):
+    """
+    Simulate a fine-mapping demonstration phenotype with **planted causal SNPs**.
+
+    Unlike :func:`simulate_pheno_from_bed` (which picks causal SNPs at random),
+    this places the given ``causal_snps`` (inside a chosen fine-mapping ``region``)
+    as the focal signals, so a downstream fine-mapping run recovers exactly them.
+    The phenotype is
+
+        ``y = Σ_k effect_k · Z(causal_k) + polygenic background + covariates + noise``
+
+    where each genotype column is standardized (``Z``), the polygenic background is
+    drawn from ``n_bg_causal`` random SNPs **outside** the region (so the region
+    contains only the planted signals), and ``n_cov`` random covariates and Gaussian
+    noise are added. Effect sizes are in phenotype SD units.
+
+    Args:
+        bed_file (str): PLINK bed prefix (without ``.bed``/``.bim``/``.fam``).
+        out_file (str): Output prefix; writes ``<out>.txt`` and ``<out>.causal_snps.txt``.
+        causal_snps (list[str]): SNP ids to plant as causal (should lie in ``region``).
+        causal_effects (list[float]): Effect size per causal SNP (SD units).
+        region (tuple[str, str]): ``(start_snp_id, end_snp_id)`` bounding the
+            fine-mapping region (inclusive, in ``.bim`` order); excluded from the
+            polygenic background.
+        n_cov (int): Number of random continuous covariates. Defaults to 3.
+        n_bg_causal (int): Polygenic-background causal SNPs (outside region).
+        bg_sd (float): SD of the background genetic component. Defaults to 0.35.
+        cov_sd (float): SD of covariate effects. Defaults to 0.15.
+        noise_sd (float): SD of the residual noise. Defaults to 1.0.
+        trait_name (str): Phenotype column name. Defaults to "pheno".
+        seed (int): Random seed. Defaults to 42.
+
+    Returns:
+        pandas.DataFrame: The phenotype table (also written to ``<out>.txt``).
+    """
+    if len(causal_snps) != len(causal_effects):
+        raise ValueError("causal_snps and causal_effects must have the same length.")
+
+    rng = np.random.default_rng(seed)
+    bim = pd.read_csv(f"{bed_file}.bim", sep=r"\s+", header=None, dtype={1: str})
+    fam = pd.read_csv(f"{bed_file}.fam", sep=r"\s+", header=None, dtype={1: str})
+    iids = fam.iloc[:, 1].astype(str).tolist()
+    n = len(iids)
+    sid_to_idx = {s: i for i, s in enumerate(bim[1])}
+
+    for sid in list(causal_snps) + list(region):
+        if sid not in sid_to_idx:
+            raise ValueError(f"SNP id not found in bim: {sid}")
+
+    r0, r1 = sid_to_idx[region[0]], sid_to_idx[region[1]]
+    region_idx = np.arange(min(r0, r1), max(r0, r1) + 1)
+    causal_idx = [sid_to_idx[c] for c in causal_snps]
+    outside = np.setdiff1d(np.arange(bim.shape[0]), region_idx)
+    bg_idx = np.sort(rng.choice(outside, min(n_bg_causal, outside.size), replace=False))
+
+    # Read all needed SNPs in one pass and standardize (mean-impute first).
+    need = np.sort(np.unique(np.r_[causal_idx, bg_idx]))
+    geno = Bed(bed_file, count_A1=True)[:, need].read().val
+    geno = _standardize_columns(_impute_by_column_mean(geno))
+    col = {snp: k for k, snp in enumerate(need)}
+
+    # Focal signals + polygenic background + covariates + noise.
+    y = np.zeros(n)
+    for c, beta in zip(causal_idx, causal_effects):
+        y += beta * geno[:, col[c]]
+    bg = geno[:, [col[i] for i in bg_idx]] @ rng.normal(size=bg_idx.size)
+    y += bg_sd * bg / (bg.std() if bg.std() > 0 else 1.0)
+    cov = rng.normal(size=(n, n_cov))
+    y += cov @ rng.normal(0.0, cov_sd, n_cov)
+    y += rng.normal(0.0, noise_sd, n)
+    y -= y.mean()
+
+    out_df = pd.DataFrame({"IID": iids})
+    for k in range(n_cov):
+        out_df[f"cov{k + 1}"] = cov[:, k]
+    out_df[trait_name] = y
+
+    out_path = Path(out_file)
+    out_prefix = out_path.with_suffix("") if out_path.suffix else out_path
+    out_txt = out_prefix.with_suffix(".txt")
+    out_df.to_csv(out_txt, sep="\t", index=False)
+
+    causal_path = out_txt.with_name(f"{out_prefix.name}.causal_snps.txt")
+    pd.DataFrame({
+        "snp_id": list(causal_snps),
+        "beta": list(causal_effects),
+        "region_start": region[0],
+        "region_end": region[1],
+    }).to_csv(causal_path, sep="\t", index=False)
+
+    logging.info("Saved fine-mapping phenotype: %s", out_txt)
+    logging.info("Saved causal SNP file: %s", causal_path)
+    logging.info("n=%d, causal=%s, region=%s-%s", n, list(causal_snps), region[0], region[1])
+    return out_df
+
+
 def _build_parser():
     parser = argparse.ArgumentParser(description="Simulate phenotype with random covariates/categorical variables from bed.")
     parser.add_argument("--bed-file", required=True, help="PLINK bed prefix (without .bed/.bim/.fam).")
