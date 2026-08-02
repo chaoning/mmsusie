@@ -213,11 +213,11 @@ class MMSuSiESp:
         GE = gls_residualize(GE, nuisance, self.Vi)
         self.last_snp_ids = None
         try:
-            res = self.mmsusie(GE, y, L=L, maxiter=maxiter, tol=tol, coverage=coverage,
-                               min_abs_corr=min_abs_corr, prior_tol=prior_tol,
-                               estimate_sigma=estimate_sigma)
+            res = self.fit(GE, y, L=L, maxiter=maxiter, tol=tol, coverage=coverage,
+                           min_abs_corr=min_abs_corr, prior_tol=prior_tol,
+                           estimate_sigma=estimate_sigma)
             res["lead_snp"] = lead_snp_ids[0] if lead_snp_ids else str(snp_id)
-            self.out_mmsusie(res, out_file)
+            self.out(res, out_file)
         finally:
             self.last_snp_ids = lead_snp_ids
         return res
@@ -505,10 +505,12 @@ class MMSuSiESp:
         self.Vi = make_sparse_block(Vi_lst)
         self.V_logdet = V_logdet
 
-    def mmsusie(self, X, y, L=10, maxiter=100, tol=1e-3, coverage=0.95,
+    def fit(self, X, y, L=10, maxiter=100, tol=1e-3, coverage=0.95,
                 min_abs_corr=0.5, prior_tol=1e-09, estimate_sigma=True, fixed=None):
         """
         Mixed-model SuSiE fine-mapping via the IBSS coordinate-ascent algorithm.
+        Named ``fit`` to mirror :class:`MMSuSiEDense`; ``mmsusie`` is a
+        backward-compatible alias.
 
         Fits ``y ~ N(Σ_l X (α_l ∘ μ_l), V)`` — a sum of ``L`` single-effect
         regressions on the genotype ``X`` with residual covariance ``V`` encoding
@@ -610,8 +612,14 @@ class MMSuSiESp:
                 # Compute residuals
                 resi = y - Xresi
 
+                # V^{-1}resi is reused below (XtViy, and the loglik/KL quadratic
+                # forms), so compute it once. Vi is symmetric, hence
+                #   X'V^{-1}resi = (Vi·resi)'X   and   resi'V^{-1}resi = resi·(Vi·resi).
+                Vir = np.asarray(Vi @ resi).ravel()
+                resiVir = resi @ Vir
+
                 # Bayesian single-effect linear regression using residuals as outcomes
-                XtViy = X.T @ (Vi @ resi)
+                XtViy = X.T @ Vir
                 betahats = shat2s * XtViy # betas for p least-squares
 
                 # optimize the prior variance
@@ -629,7 +637,7 @@ class MMSuSiESp:
 
                 alpha_arr, lbf_model = calAlpha([sigma0], betahats, shat2s, prior_weights)
                 loglik = lbf_model - 0.5 * n * np.log(2 * np.pi) - 0.5 * V_logdet - \
-                            0.5 * (resi @ (Vi @ resi))
+                            0.5 * resiVir
 
                 post_var_arr = 1 / (1 / sigma0 + 1 / shat2s) # Posterior variance.
                 post_mean_arr = betahats / shat2s * post_var_arr
@@ -644,9 +652,11 @@ class MMSuSiESp:
                 # KL(posterior || prior) for this effect = (expected log-lik under
                 # the SER posterior) − (marginal log-lik); the E[·] over the effect
                 # expands resi'Vi resi into mean and second-moment terms.
+                # resi'Vi(X·(α∘μ)) = (X'Vi·resi)·(α∘μ) = XtViy·(α∘μ) by symmetry of Vi,
+                # so no extra Vi mat-vec is needed here.
                 SER_posterior_e_loglik = - 0.5 * n * np.log(2 * np.pi) - 0.5 * V_logdet \
-                            - 0.5 * ( resi @ (Vi @ resi) -
-                                      2 * np.sum(resi @ (Vi @ (X @ (alpha_arr * post_mean_arr)))) +
+                            - 0.5 * ( resiVir -
+                                      2 * (XtViy @ (alpha_arr * post_mean_arr)) +
                                       np.sum(xtVix * (alpha_arr * post_mean2_arr)) )
                 KL_arr[l] = -loglik + SER_posterior_e_loglik
 
@@ -714,6 +724,9 @@ class MMSuSiESp:
             feat_names = list(range(p))
         res_dct["alpha"] = alpha_arr2
         res_dct["mu"] = mu_arr2
+        # Feature (SNP/ENV) names, matching MMSuSiEDense so callers can map credible
+        # sets to names uniformly, e.g. [[res["snp_ids"][i] for i in cs] for cs in res["cs"]].
+        res_dct["snp_ids"] = [str(f) for f in feat_names]
         res_dct["pip"] = pd.DataFrame({"pip": getPIP(alpha_arr2)}, index=feat_names)
         status = in_CS(alpha_arr2, coverage)
         cs_lst = get_CS(status)
@@ -727,9 +740,14 @@ class MMSuSiESp:
         res_dct["KL"] = KL_arr
         return res_dct
 
-    def out_mmsusie(self, res_dct, out_file):
+    # Backward-compatible alias for the pre-rename method name.
+    mmsusie = fit
+
+    def out(self, res_dct, out_file):
         """
         Write the fine-mapping result tables to ``<out_file>.{pip,alpha,mu,cs}.txt``.
+        Named ``out`` to mirror :class:`MMSuSiEDense`; ``out_mmsusie`` is a
+        backward-compatible alias.
 
         The PIP index is labelled ``SNP`` when the columns are genotype variants
         (``last_snp_ids`` set by :meth:`get_genotype`) and ``ENV`` otherwise.
@@ -750,3 +768,6 @@ class MMSuSiESp:
         with open(out_file + ".cs.txt", "w") as f:
             for vec in res_dct["cs"]:
                 f.write(" ".join([env_names[int(i)] for i in vec]) + "\n")
+
+    # Backward-compatible alias for the pre-rename method name.
+    out_mmsusie = out

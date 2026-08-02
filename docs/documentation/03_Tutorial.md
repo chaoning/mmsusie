@@ -133,11 +133,18 @@ ms.cal_spVi(varcom)   # [sigma_g2, sigma_e2]
 # 3) Fine-map the region with full FWL
 y = ms.get_y(adjust=False)
 G = ms.get_genotype("test", start="rs2165666", end="rs4863332")
-result = ms.mmsusie(G, y, L=10, estimate_sigma=True, fixed=ms.get_fixed())
+result = ms.fit(G, y, L=10, estimate_sigma=True, fixed=ms.get_fixed())
 
-# 4) Export result tables
-ms.out_mmsusie(result, out_file="output/test_mmsusie_sp")
+# 4) Credible sets by SNP name — result["snp_ids"] mirrors MMSuSiEDense
+cs_named = [[result["snp_ids"][i] for i in cs] for cs in result["cs"]]
+print("credible sets:", cs_named)   # [['rs1487590'], ['rs1462069']]
+
+# 5) Export result tables
+ms.out(result, out_file="output/test_mmsusie_sp")
 ```
+
+`MMSuSiESp.fit` / `out` mirror `MMSuSiEDense`, so both workflows share the same
+fine-mapping and export calls (`mmsusie` / `out_mmsusie` stay as aliases).
 
 Like the dense run, this returns `[['rs1487590'], ['rs1462069']]`. On the example
 data the native `WeightEMAISp` estimate matches `fastgxe`'s REML to ~4 decimals.
@@ -174,7 +181,7 @@ R² to the covariates. Otherwise adjusting `y` only is a close approximation.
 
 ## 4. Output files
 
-Both `out` (dense) and `out_mmsusie` (sparse) write:
+`out` (both `MMSuSiEDense` and `MMSuSiESp`) writes:
 
 | File | Contents |
 | --- | --- |

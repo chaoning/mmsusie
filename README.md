@@ -27,7 +27,7 @@ Two classes are exported at the package level:
 | Class | File | GRM type | Key methods |
 |---|---|---|---|
 | `MMSuSiEDense` | `mmsusie_dense.py` | Dense (`cal_Vi`) | `fit`, `process_y`, `out` |
-| `MMSuSiESp` | `mmsusie_sp.py` | Sparse block-diagonal (`cal_spVi`) | `mmsusie`, `get_y`, `get_fixed`, `out_mmsusie` |
+| `MMSuSiESp` | `mmsusie_sp.py` | Sparse block-diagonal (`cal_spVi`) | `fit`, `get_y`, `get_fixed`, `out` |
 
 Also exported: `agmat` (GRM), `WeightEMAI` / `WeightEMAISp` (variance components),
 `prepare_varcom_inputs`.
@@ -198,11 +198,18 @@ G = ms.get_genotype("test", start="rs2165666", end="rs4863332")
 # V^{-1} metric (no separate get_y adjustment needed). estimate_sigma=True jointly
 # re-estimates the variance components and refreshes the projection each IBSS sweep.
 # Omit fixed= (default) to adjust only y (backward-compatible).
-result = ms.mmsusie(G, y, L=10, estimate_sigma=True, fixed=ms.get_fixed())
+result = ms.fit(G, y, L=10, estimate_sigma=True, fixed=ms.get_fixed())
 
-# 6) Export result tables
-ms.out_mmsusie(result, out_file="output/test_mmsusie_sp")
+# 6) Credible sets by SNP name (result["snp_ids"] mirrors MMSuSiEDense)
+cs_named = [[result["snp_ids"][i] for i in cs] for cs in result["cs"]]
+print("credible sets:", cs_named)   # [['rs1487590'], ['rs1462069']]
+
+# 7) Export result tables
+ms.out(result, out_file="output/test_mmsusie_sp")
 ```
+
+`MMSuSiESp.fit` / `out` mirror `MMSuSiEDense` so both workflows share the same
+fine-mapping and export calls (`mmsusie` / `out_mmsusie` remain as aliases).
 
 ## Covariate (fixed-effect) handling
 
