@@ -57,18 +57,19 @@ def filter_prior_components_mmsusie(alpha_arr2, mu_arr2, sigma0_arr, prior_tol):
 
     Returns:
         alpha_LJ_new (ndarray): Filtered prior weights matrix.
-        mu_LJQ_new (list of ndarray): Filtered list of posterior means.
+        mu_LJQ_new (ndarray): Filtered posterior means.
+        valid_components (ndarray): Boolean mask (length L) of the kept effects, so
+            the caller can slice the other per-effect arrays (sigma0/lbf/KL) the same
+            way and keep every returned array row-aligned.
     """
     # Identify components with prior variance greater than the threshold
     valid_components = sigma0_arr > prior_tol
 
-    # Filter alpha_LJ rows
+    # Filter alpha/mu rows by the same mask
     alpha_arr2_new = alpha_arr2[valid_components, :]
-
-    # Filter mu_LJQ entries
     mu_arr2_new = mu_arr2[valid_components, :]
 
-    return alpha_arr2_new, mu_arr2_new
+    return alpha_arr2_new, mu_arr2_new, valid_components
 
 
 def getPIP(alpha_arr2):

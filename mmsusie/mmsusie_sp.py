@@ -479,8 +479,19 @@ class MMSuSiESp:
         Args:
             varcom (np.ndarray): Variance components (length 1-4).
         """
-        self.varcom = np.array(varcom, dtype=float)
+        varcom = np.asarray(varcom, dtype=float)
         nvc = len(varcom)
+        # Validate up front so an invalid spec fails loudly instead of silently
+        # producing a NaN log-determinant or a non-PD "inverse".
+        if nvc not in (1, 2, 3, 4):
+            raise ValueError(f"varcom must have 1-4 components, got {nvc}.")
+        if np.any(varcom < 0) or varcom[-1] <= 0:
+            raise ValueError(
+                f"variance components must be >= 0 with a positive residual (last); got {varcom.tolist()}."
+            )
+        if nvc >= 3 and getattr(self, "env_int_arr2", None) is None:
+            raise ValueError("nvc >= 3 requires the environment matrix; call get_env_int() first.")
+        self.varcom = varcom
 
         if nvc == 1:                                    # V = σ_e² I
             num_iid_used = len(self.iid_used)
@@ -503,10 +514,14 @@ class MMSuSiESp:
             A = block_grm_covariances(nvc, grm_block, i == 0, env_block, num_env)
             V_block = sum(varcom[j] * A[j] for j in range(nvc))
             if i == 0:                                  # singleton diagonal block
+                if np.any(V_block <= 0):
+                    raise ValueError("Non-positive singleton variance; check the variance components.")
                 V_logdet += np.sum(np.log(V_block))
                 Vi_lst.append(1.0 / V_block)
             else:                                       # dense related block
-                _, logdet = np.linalg.slogdet(V_block)
+                sign, logdet = np.linalg.slogdet(V_block)
+                if sign <= 0:
+                    raise ValueError("A related-block covariance is not positive definite; check the variance components.")
                 V_logdet += logdet
                 Vi_lst.append(np.linalg.inv(V_block))
             start += num_element
@@ -726,7 +741,10 @@ class MMSuSiESp:
             if np.absolute(elbo_arr[iter + 1] - elbo_arr[iter]) < tol:
                 break
         
-        alpha_arr2, mu_arr2 = filter_prior_components_mmsusie(alpha_arr2, mu_arr2, sigma0_arr, prior_tol)
+        # Prune near-null effects and slice EVERY per-effect array by the same mask so
+        # the returned arrays stay row-aligned (alpha/mu/sigma0/lbf/KL share one length).
+        alpha_arr2, mu_arr2, kept = filter_prior_components_mmsusie(alpha_arr2, mu_arr2, sigma0_arr, prior_tol)
+        sigma0_arr, lbf_arr, KL_arr = sigma0_arr[kept], lbf_arr[kept], KL_arr[kept]
         if self.last_snp_ids is not None and len(self.last_snp_ids) == p:
             feat_names = self.last_snp_ids
         elif self.env_int and len(self.env_int) == p:
@@ -735,6 +753,7 @@ class MMSuSiESp:
             feat_names = list(range(p))
         res_dct["alpha"] = alpha_arr2
         res_dct["mu"] = mu_arr2
+        res_dct["kept_effects"] = np.where(kept)[0]
         # Feature (SNP/ENV) names, matching MMSuSiEDense so callers can map credible
         # sets to names uniformly, e.g. [[res["snp_ids"][i] for i in cs] for cs in res["cs"]].
         res_dct["snp_ids"] = [str(f) for f in feat_names]

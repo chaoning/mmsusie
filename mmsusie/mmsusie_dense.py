@@ -212,8 +212,11 @@ class MMSuSiEDense:
             raise ValueError("varcom must be a list or array with two elements: [sigma_g^2, sigma_e^2]")
 
         sigma_g2, sigma_e2 = varcom
-        if sigma_g2 <= 0 or sigma_e2 <= 0:
-            raise ValueError("Both variance components must be non-negative, and sigma_e^2 must be > 0.")
+        # sigma_g^2 == 0 is a valid boundary (V = sigma_e^2 I, i.e. standard SuSiE);
+        # only the residual variance must be strictly positive. Positive-definiteness
+        # of the assembled V is enforced by the slogdet sign check below.
+        if sigma_g2 < 0 or sigma_e2 <= 0:
+            raise ValueError("sigma_g^2 must be >= 0 and sigma_e^2 must be > 0.")
 
         # Construct V = sigma_g^2 * GRM + sigma_e^2 * I
         n = gmat.shape[0]
@@ -393,9 +396,13 @@ class MMSuSiEDense:
             if np.absolute(elbo_arr[iter + 1] - elbo_arr[iter]) < tol:
                 break
 
-        alpha_arr2, mu_arr2 = filter_prior_components_mmsusie(alpha_arr2, mu_arr2, sigma0_arr, prior_tol)
+        # Prune near-null effects and slice EVERY per-effect array by the same mask so
+        # the returned arrays stay row-aligned (alpha/mu/sigma0/lbf/KL share one length).
+        alpha_arr2, mu_arr2, kept = filter_prior_components_mmsusie(alpha_arr2, mu_arr2, sigma0_arr, prior_tol)
+        sigma0_arr, lbf_arr, KL_arr = sigma0_arr[kept], lbf_arr[kept], KL_arr[kept]
         res_dct["alpha"] = alpha_arr2
         res_dct["mu"] = mu_arr2
+        res_dct["kept_effects"] = np.where(kept)[0]
         if pip_index is None:
             if self.last_snp_ids is not None and len(self.last_snp_ids) == p:
                 pip_index = self.last_snp_ids
