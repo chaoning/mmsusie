@@ -239,9 +239,13 @@ approximation.
 `log|X'V⁻¹X|` term. The in-loop `fit(estimate_sigma=True)` refit is instead a
 **profile-ML / mixed-model (generalized-EM) update**: each IBSS sweep maximizes the
 profile likelihood at the current SuSiE fit under the current projection, then
-re-projects once V changes at the next sweep. The two agree closely but are not
-identical — use the REML estimator up front to obtain the variance components, and
-`estimate_sigma=True` to let them drift jointly with the fine-mapping.
+re-projects once V changes at the next sweep. **The two can differ substantially** —
+adding the SuSiE effects and switching from REML to profile-ML re-attributes
+variance, and σ²_g often falls toward its lower bound (e.g. a REML estimate of
+`[0.83, 0.90]` can become `[~1e-10, 1.03]` after joint updating). Use
+`estimate_sigma=False` to keep the fixed REML variance components — the standard
+mixed-model correction; use `estimate_sigma=True` only when you want them
+re-estimated jointly, and inspect the returned `varcom` before trusting the result.
 
 ## Input Data Notes
 

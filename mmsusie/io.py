@@ -82,28 +82,35 @@ def read_genotype_matrix(bedfile, iid_lst, sid_lst=None, scale=True, *, start=No
 
     snp_used_ids = bim_sids[snp_used_index].astype(str).tolist()
 
-    # Read, mean-impute, and optionally standardize.
+    # Read and mean-impute partially-missing SNPs.
     snp_on_disk = Bed(bedfile, count_A1=True)
     genotype_matrix = snp_on_disk[iid_used_index, snp_used_index].read().val
     genotype_matrix = pd.DataFrame(genotype_matrix)
     genotype_matrix.fillna(genotype_matrix.mean(), inplace=True)
-    # A column that is entirely missing has a NaN column-mean, so the fill above
-    # leaves it NaN (which would then propagate through standardization). Fill any
-    # such fully-missing SNP with 0 and warn instead of silently emitting NaNs.
-    all_missing = [c for c in genotype_matrix.columns if genotype_matrix[c].isna().all()]
-    if all_missing:
-        miss_ids = [snp_used_ids[c] for c in all_missing]
-        logging.warning(
-            f"{len(all_missing)} SNP(s) entirely missing; filled with 0: "
-            f"{miss_ids[:10]}{' ...' if len(miss_ids) > 10 else ''}"
-        )
-        genotype_matrix.fillna(0.0, inplace=True)
     genotype_matrix = genotype_matrix.values
+
+    # Drop zero-variance SNPs — monomorphic columns and fully-missing columns (whose
+    # column-mean is NaN, so they survive the fill above). They carry no fine-mapping
+    # information and would make x'V^{-1}x = 0 after standardization, which otherwise
+    # aborts the whole region. Keep the returned SNP ids in sync with the columns.
+    col_ok = np.isfinite(genotype_matrix).all(axis=0)
+    keep = col_ok.copy()
+    if col_ok.any():
+        keep[col_ok] = genotype_matrix[:, col_ok].std(axis=0) > 0
+    if not keep.all():
+        dropped = [snp_used_ids[i] for i in np.flatnonzero(~keep)]
+        logging.warning(
+            f"Dropping {len(dropped)} zero-variance / all-missing SNP(s): "
+            f"{dropped[:10]}{' ...' if len(dropped) > 10 else ''}"
+        )
+        genotype_matrix = genotype_matrix[:, keep]
+        snp_used_ids = [s for s, k in zip(snp_used_ids, keep) if k]
+    if genotype_matrix.shape[1] == 0:
+        raise ValueError("All selected SNPs are zero-variance / all-missing; nothing to fine-map.")
 
     if scale:
         mean_genotype = np.mean(genotype_matrix, axis=0).reshape(1, -1)
         std_genotype = np.std(genotype_matrix, axis=0).reshape(1, -1)
-        std_genotype[std_genotype == 0] = 1.0
         genotype_matrix = (genotype_matrix - mean_genotype) / std_genotype
 
     return genotype_matrix, snp_used_ids

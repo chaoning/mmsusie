@@ -15,6 +15,27 @@ def _example_iids():
     return fam.iloc[:, 1].astype(str).tolist()
 
 
+def test_drops_zero_variance_snps(tmp_path):
+    """#2: monomorphic and fully-missing SNPs are dropped (ids stay in sync), so a
+    region containing them still fine-maps instead of aborting."""
+    from pysnptools.snpreader import Bed, SnpData
+
+    n, p = 20, 5
+    rng = np.random.default_rng(0)
+    val = rng.integers(0, 3, size=(n, p)).astype(float)
+    val[:, 1] = 0.0        # monomorphic SNP
+    val[:, 3] = np.nan      # fully-missing SNP
+    iid = np.array([[f"f{k}", f"i{k}"] for k in range(n)])
+    sid = [f"rs{j}" for j in range(p)]
+    prefix = str(tmp_path / "mini")
+    Bed.write(prefix, SnpData(iid=iid, sid=sid, val=val), count_A1=True)
+
+    mat, ids = read_genotype_matrix(prefix, [f"i{k}" for k in range(n)], sid_lst=sid)
+    assert ids == ["rs0", "rs2", "rs4"]      # rs1 (mono) and rs3 (missing) dropped
+    assert mat.shape == (n, 3)
+    assert np.isfinite(mat).all()
+
+
 @pytest.mark.slow
 def test_get_genotype_range_matches_list(example_dir):
     """Selecting a region by (start, end) matches selecting the same SNPs by id list."""
