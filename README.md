@@ -1,6 +1,14 @@
 # MMSuSiE
 
-MMSuSiE is a Python package for mixed-model SuSiE fine-mapping.
+MMSuSiE is a Python package for mixed-model SuSiE fine-mapping. It is the
+fine-mapping component of [fastGxE](https://github.com/chaoning/fastGxE)
+(Ning and Zhou, *Nature Genetics* 2026): after fastGxE scans the genome for GxE signal, mmSuSiE
+resolves which SNPs in a candidate locus drive it and which environmental
+factors are involved. Because it extends SuSiE with a mixed-model (GRM-adjusted)
+residual covariance, it can also be used on its own to **fine-map causal SNPs in
+samples with genetic relatedness** (families, isolates, biobanks with cryptic
+relatedness), where standard SuSiE assumes independent individuals.
+
 It provides an end-to-end workflow for:
 
 - building additive genetic relationship matrices (GRM) from PLINK files,
@@ -280,6 +288,16 @@ pip install -r requirements-dev.txt
 pytest                 # full suite
 pytest -m "not slow"   # fast, synthetic-only (no example data / GRM build)
 ```
+
+## Citing the work
+
+If you find the `mmsusie` package or any of the source code in this repository useful for your work, please cite:
+
+> Genome-wide detection of genotype-environment interactions at biobank scale with fastGxE. Chao Ning, Xiang Zhou\*. *Nature Genetics*, 2026 (accepted).
+
+## More software
+
+For more statistical software, visit [Chao Ning's software page](https://chaoning.github.io/software.html).
 
 ## License
 
